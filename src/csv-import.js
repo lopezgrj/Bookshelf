@@ -102,10 +102,14 @@ export async function importBooks({ language, onImported, notify, onStateChange 
         <label class="csv-check"><input type="checkbox" data-ignore>${text("ignore")}</label>` : ""}
       <div class="table-wrap csv-preview"><table><caption>${text("preview")}</caption><thead><tr>
         ${["record", "title", "authors", "year"].map((key) => `<th scope="col">${text(key)}</th>`).join("")}<th scope="col">ISBN</th>
-        <th scope="col">DDC</th><th scope="col">LCC</th><th scope="col">${text("publisher")}</th><th scope="col">${text("genre")}</th><th scope="col">${text("notes")}</th><th scope="col">${text("duplicate")}</th>
+        <th scope="col">DDC</th><th scope="col">LCC</th><th scope="col">${text("tags")}</th><th scope="col">${text("identifiers")}</th>
+        <th scope="col">${text("contentLanguage")}</th><th scope="col">${text("pages")}</th>
+        <th scope="col">${text("publisher")}</th><th scope="col">${text("genre")}</th><th scope="col">${text("notes")}</th><th scope="col">${text("duplicate")}</th>
       </tr></thead><tbody>${rows.map(({ record, book, duplicate }) => `<tr><td>${record}</td><td>${escape(book.title)}</td>
         <td>${escape(book.authors.join("; "))}</td><td>${escape(book.publicationYear)}</td><td>${escape(book.isbn)}</td>
-        <td>${escape(book.ddc)}</td><td>${escape(book.lcc)}</td><td>${escape(book.publisher)}</td><td>${escape(book.genre)}</td>
+        <td>${escape(book.ddc)}</td><td>${escape(book.lcc)}</td><td>${escape(book.tags?.join("; "))}</td>
+        <td>${escape(book.identifiers?.join("; "))}</td><td>${escape(book.language)}</td><td>${escape(book.pages)}</td>
+        <td>${escape(book.publisher)}</td><td>${escape(book.genre)}</td>
         <td class="csv-notes">${escape(book.notes)}</td><td>${duplicate ? text("duplicate") : "—"}</td></tr>`).join("")}</tbody></table></div>
       <div class="pagination"><button type="button" class="button secondary" data-page-step="-1" ${page === 1 ? "disabled" : ""}>${text("previous")}</button>
       <span>${text("page")} ${page} / ${pages}</span>

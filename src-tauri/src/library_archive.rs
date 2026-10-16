@@ -735,6 +735,10 @@ mod tests {
             genre: None,
             ddc: Some("005.133".into()),
             lcc: None,
+            tags: vec![],
+            identifiers: vec![],
+            language: None,
+            pages: None,
             notes: None,
             cover_image: Some(CoverImage {
                 path: cover_relative.into(),

@@ -82,11 +82,15 @@ Samples: [comma-separated](examples/books.csv) and [pipe-separated](examples/boo
 | `genre` | No | Text |
 | `ddc` | No | Text, e.g. `005.133` |
 | `lcc` | No | Text, e.g. `QA76.73.R87` |
+| `tags` | No | Semicolon-separated text values |
+| `identifiers` | No | Semicolon-separated strings; leading zeros are preserved |
+| `language` | No | Book content language, stored as entered |
+| `pages` | No | Positive whole number |
 | `notes` | No | Text, including quoted multiline values |
 
-Headers are case-sensitive and stay in English. Quote fields containing the chosen delimiter, quotes or line breaks; escape quotes as `""`. A pipe inside a comma-separated quoted field, or vice versa, remains data. Blank optional fields are absent, blank authors become an empty array, and entirely blank records are ignored. Record numbering includes header record 1; multiline values still count as one record.
+Headers are case-sensitive and stay in English. Quote fields containing the chosen delimiter, quotes or line breaks; escape quotes as `""`. A pipe inside a comma-separated quoted field, or vice versa, remains data. Blank optional fields are absent; blank authors, tags, and identifiers become empty arrays. Tags and identifiers are split on semicolons. Page counts must be positive whole numbers. Entirely blank records are ignored. Record numbering includes header record 1; multiline values still count as one record.
 
-Invalid UTF-8, headers, quotes, field counts, titles or years block import with record/column feedback. Unknown columns require explicit acknowledgement and are ignored. Possible duplicates are flagged by normalized ISBN or canonically Unicode-normalized, case-folded title/authors (author order ignored, accents preserved, repeated whitespace collapsed). Accent-insensitive search is **not** the duplicate identity rule. Approve duplicates explicitly to create separate records; nothing is merged or overwritten.
+Invalid UTF-8, headers, quotes, field counts, titles, years or page counts block import with record/column feedback. Unknown columns require explicit acknowledgement and are ignored. Possible duplicates are flagged by normalized ISBN or canonically Unicode-normalized, case-folded title/authors (author order ignored, accents preserved, repeated whitespace collapsed). Accent-insensitive search is **not** the duplicate identity rule. Approve duplicates explicitly to create separate records; nothing is merged or overwritten.
 
 Preview writes nothing. Confirmation revalidates and rechecks duplicates in the same transaction used for saving. Cancellation is available before the database transaction starts; once it starts, the UI disables cancellation and reports the transaction's committed or rolled-back result. Changing library/input invalidates previews. After a successful import the count is announced and the catalog refreshed.
 

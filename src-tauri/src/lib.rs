@@ -57,6 +57,14 @@ struct Book {
     ddc: Option<String>,
     #[serde(default)]
     lcc: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    identifiers: Vec<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    pages: Option<u64>,
     notes: Option<String>,
     cover_image: Option<CoverImage>,
     created_at: String,
@@ -296,6 +304,16 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+pub(crate) fn clean_string_list<T: AsRef<str>>(values: impl IntoIterator<Item = T>) -> Vec<String> {
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let trimmed = value.as_ref().trim().to_owned();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+        .collect()
+}
+
 fn search_key(value: &str) -> String {
     collapse_whitespace(
         &value
@@ -362,12 +380,19 @@ fn now_string() -> String {
     Local::now().to_rfc3339()
 }
 
-fn validate_book_fields(title: &str, publication_year: Option<i32>) -> Result<(), String> {
+fn validate_book_fields(
+    title: &str,
+    publication_year: Option<i32>,
+    pages: Option<u64>,
+) -> Result<(), String> {
     if title.trim().is_empty() {
         return Err("REQUIRED_TITLE: Enter a book title.".into());
     }
     if publication_year.is_some_and(|year| year < 0) {
         return Err("INVALID_PUBLICATION_YEAR: Enter a non-negative integer year.".into());
+    }
+    if pages == Some(0) {
+        return Err("INVALID_PAGES: Page count must be a positive whole number.".into());
     }
     Ok(())
 }
@@ -467,8 +492,12 @@ pub(crate) fn validate_open_library(
                     let document: Book =
                         serde_json::from_str(&body).map_err(|e| error(e.to_string()))?;
                     validate_schema(document.schema_version).map_err(error)?;
-                    validate_book_fields(&document.title, document.publication_year)
-                        .map_err(error)?;
+                    validate_book_fields(
+                        &document.title,
+                        document.publication_year,
+                        document.pages,
+                    )
+                    .map_err(error)?;
                 }
                 "copies" => {
                     let document: CopyRecord =
@@ -1113,6 +1142,18 @@ fn list_books(state: State<'_, AppState>, search: String) -> Result<Vec<BookView
                     .lcc
                     .as_deref()
                     .is_some_and(|value| identifier_key(value).contains(&classification_needle))
+                || book
+                    .tags
+                    .iter()
+                    .any(|value| search_key(value).contains(&needle))
+                || book
+                    .identifiers
+                    .iter()
+                    .any(|value| identifier_key(value).contains(&identifier_needle))
+                || book
+                    .language
+                    .as_deref()
+                    .is_some_and(|value| search_key(value).contains(&needle))
                 || copies_by_book
                     .get(book.id.as_str())
                     .into_iter()
@@ -1153,11 +1194,15 @@ fn save_book(
     genre: Option<String>,
     ddc: Option<String>,
     lcc: Option<String>,
+    tags: Vec<String>,
+    identifiers: Vec<String>,
+    language: Option<String>,
+    pages: Option<u64>,
     notes: Option<String>,
 ) -> Result<Book, String> {
     ensure_library_open(&state)?;
     let title = title.trim().to_owned();
-    validate_book_fields(&title, publication_year)?;
+    validate_book_fields(&title, publication_year, pages)?;
     let connection = state.connection.lock().map_err(app_error)?;
     let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let previous: Option<Book> = read_document(&connection, "books", &id)?;
@@ -1181,6 +1226,10 @@ fn save_book(
         genre: clean_optional(genre),
         ddc: normalize_classification(ddc),
         lcc: normalize_classification(lcc),
+        tags: clean_string_list(tags),
+        identifiers: clean_string_list(identifiers),
+        language: clean_optional(language),
+        pages,
         notes: clean_optional(notes),
         cover_image: previous
             .as_ref()
@@ -1751,6 +1800,18 @@ fn query_books_backend(
                 .lcc
                 .as_deref()
                 .is_some_and(|value| identifier_key(value).contains(&classification_needle))
+            || book
+                .tags
+                .iter()
+                .any(|value| search_key(value).contains(&needle))
+            || book
+                .identifiers
+                .iter()
+                .any(|value| identifier_key(value).contains(&identifier_needle))
+            || book
+                .language
+                .as_deref()
+                .is_some_and(|value| search_key(value).contains(&needle))
             || (!isbn_needle.is_empty()
                 && normalized_isbn(book.isbn.as_deref().unwrap_or_default())
                     .contains(&isbn_needle))
@@ -2531,6 +2592,10 @@ mod tests {
             genre: None,
             ddc: Some("005.133".into()),
             lcc: Some("QA76.73.R87".into()),
+            tags: vec![],
+            identifiers: vec![],
+            language: None,
+            pages: None,
             notes: None,
             cover_image: None,
             created_at: now.clone(),
@@ -2658,6 +2723,10 @@ mod tests {
             .unwrap();
         assert_eq!(old_book.ddc, None);
         assert_eq!(old_book.lcc, None);
+        assert!(old_book.tags.is_empty());
+        assert!(old_book.identifiers.is_empty());
+        assert_eq!(old_book.language, None);
+        assert_eq!(old_book.pages, None);
         assert_eq!(old_book.extra["legacyField"]["keep"], true);
         let returned: Loan = read_document(&connection, "loans", "returned")
             .unwrap()
@@ -2797,6 +2866,10 @@ mod tests {
                 genre: None,
                 ddc: Some(format!("{:03}.{:03}", index % 999, index % 1000)),
                 lcc: Some(format!("QA{index:05}")),
+                tags: vec![],
+                identifiers: vec![],
+                language: None,
+                pages: None,
                 notes: None,
                 cover_image,
                 created_at: now.clone(),
@@ -2930,6 +3003,10 @@ mod tests {
         let (mut book, mut copy, _) = seed_lending_records(&connection);
         book.title = "Français   Book".into();
         book.authors = vec!["Alice Reader".into()];
+        book.tags = vec!["Économie".into()];
+        book.identifiers = vec!["001-ABC".into()];
+        book.language = Some("Français".into());
+        book.pages = Some(240);
         copy.copy_identifier = "É0001".into();
         copy.location = Some("Room   Étage 2".into());
         let tx = connection.unchecked_transaction().unwrap();
@@ -2954,8 +3031,13 @@ mod tests {
         assert_eq!(books("francais  book").total, 1);
         assert_eq!(books("book alice").total, 0);
         assert_eq!(books("room étage").total, 1);
+        assert_eq!(books("economie").total, 1);
+        assert_eq!(books("francais").total, 1);
+        assert_eq!(books("001-abc").total, 1);
         assert_eq!(books("e0001").total, 0);
         assert_eq!(books("É0001").total, 1);
+        assert!(validate_book_fields("Book", None, Some(0)).is_err());
+        assert!(validate_book_fields("Book", None, Some(240)).is_ok());
     }
 
     #[test]
@@ -3026,6 +3108,10 @@ mod tests {
             genre: None,
             ddc: None,
             lcc: None,
+            tags: vec![],
+            identifiers: vec![],
+            language: None,
+            pages: None,
             notes: None,
             cover_image: None,
             created_at: now.clone(),

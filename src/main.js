@@ -50,6 +50,7 @@ function errorMessage(error) {
     BOOK_HAS_COPIES: "bookHasCopies", COPY_HAS_HISTORY: "copyHasHistory",
     COPY_HAS_LOANS: "copyHasHistory", COPY_HAS_ACTIVE_LOAN: "copyHasActiveLoan",
     INACTIVE_PATRON: "inactivePatron", INVALID_DATE: "invalidDate",
+    INVALID_PAGES: "invalidPages",
     DUPLICATE_IDENTIFIER: "duplicateIdentifier", OPERATION_CANCELLED: "cancelled",
     OPERATION_COMMITTING: "committing", INVALID_LOAN_PERIOD: "loanPeriodInvalid",
   };
@@ -76,7 +77,7 @@ function button(label, attributes = "", style = "secondary") {
 
 function field(key, value = "", attributes = "") {
   const id = `field-${key}-${++fieldNumber}`;
-  return `<label for="${id}">${key === "isbn" ? "ISBN" : t(key)}</label>
+  return `<label for="${id}">${key === "isbn" ? "ISBN" : t(key === "language" ? "contentLanguage" : key)}</label>
     <input id="${id}" name="${key}" value="${escape(value)}" ${attributes}>`;
 }
 
@@ -337,17 +338,28 @@ async function bookForm(book = {}) {
     field("isbn", book.isbn), field("publisher", book.publisher),
     field("publicationYear", book.publicationYear, 'type="number" min="0" max="2147483647" step="1"'),
     field("genre", book.genre), `<p id="classification-help">${t("classificationHint")}</p>`,
-    field("ddc", book.ddc, 'aria-describedby="classification-help"'), field("lcc", book.lcc, 'aria-describedby="classification-help"'), textarea("notes", book.notes),
+    field("ddc", book.ddc, 'aria-describedby="classification-help"'), field("lcc", book.lcc, 'aria-describedby="classification-help"'),
+    field("tags", book.tags?.join("; ")), field("identifiers", book.identifiers?.join("; ")),
+    field("language", book.language), field("pages", book.pages, 'type="number" min="1" step="1"'),
+    textarea("notes", book.notes),
   ].join(""), async (values) => invoke("save_book", {
     ...values, id: book.id || null, authors: values.authors.split(";").map((author) => author.trim()).filter(Boolean),
+    tags: values.tags.split(";").map((tag) => tag.trim()).filter(Boolean),
+    identifiers: values.identifiers.split(";").map((identifier) => identifier.trim()).filter(Boolean),
     publicationYear: values.publicationYear ? Number(values.publicationYear) : null,
+    pages: values.pages ? Number(values.pages) : null,
   }));
 }
 
 async function bookDetail(book) {
   const { dialog, close } = await modal(book.title, `<div class="book-detail">
     <div class="detail-cover">${book.coverImage ? `<img data-cover="${escape(book.id)}" alt="${escape(book.title)}">` : `<span class="cover-placeholder">${t("noCover")}</span>`}</div>
-    <div><p>${escape(book.authors.join("; "))}</p><dl>${["isbn", "publisher", "publicationYear", "genre", "ddc", "lcc", "notes"].map((key) => `<dt>${key === "isbn" ? "ISBN" : t(key)}</dt><dd>${escape(book[key] ?? "—")}</dd>`).join("")}</dl>
+    <div><p>${escape(book.authors.join("; "))}</p><dl>${[
+      ["isbn", book.isbn], ["publisher", book.publisher], ["publicationYear", book.publicationYear],
+      ["genre", book.genre], ["ddc", book.ddc], ["lcc", book.lcc], ["tags", book.tags?.join("; ")],
+      ["identifiers", book.identifiers?.join("; ")], ["contentLanguage", book.language], ["pages", book.pages],
+      ["notes", book.notes],
+    ].map(([key, value]) => `<dt>${key === "isbn" ? "ISBN" : t(key)}</dt><dd>${escape(value ?? "—")}</dd>`).join("")}</dl>
     <p>${t("coverHint")}</p><div class="header-actions">${button(t("edit"), "data-edit")}${button(t("changeCover"), "data-cover-pick")}${book.coverImage ? button(t("removeCover"), "data-cover-remove") : ""}${button(t("deleteBook"), "data-delete")}</div></div></div>
     <h3>${t("copies")}</h3><div id="copy-results"></div>${button(t("addCopy"), "data-add-copy")}`);
   dialog.querySelector("[data-edit]").onclick = () => act(async () => { await close(true); await bookForm(book); });

@@ -6,13 +6,13 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::{
-    app_error, clean_optional, current_library_dir, ensure_library_open, identity_key,
-    list_documents, now_string, save_document, validate_book_fields, AppState, Book,
+    app_error, clean_optional, clean_string_list, current_library_dir, ensure_library_open,
+    identity_key, list_documents, now_string, save_document, validate_book_fields, AppState, Book,
     OperationStatus, MAX_CSV_BYTES, SCHEMA_VERSION,
 };
 use std::collections::HashMap;
 
-const COLUMNS: [&str; 9] = [
+const COLUMNS: [&str; 13] = [
     "title",
     "isbn",
     "authors",
@@ -21,6 +21,10 @@ const COLUMNS: [&str; 9] = [
     "genre",
     "ddc",
     "lcc",
+    "tags",
+    "identifiers",
+    "language",
+    "pages",
     "notes",
 ];
 const MAX_RECORDS: usize = 10_000;
@@ -339,9 +343,25 @@ fn parse_csv_delimited_with_cancel(
                 }
             }
         };
-        if let Err(error) = validate_book_fields(cell("title"), year) {
+        let pages_text = cell("pages");
+        let pages = if pages_text.is_empty() {
+            None
+        } else {
+            match pages_text.parse::<u64>() {
+                Ok(pages) if pages > 0 => Some(pages),
+                _ => {
+                    preview
+                        .errors
+                        .push(issue(record_number, "pages", "invalid_pages"));
+                    None
+                }
+            }
+        };
+        if let Err(error) = validate_book_fields(cell("title"), year, pages) {
             let (column, code) = if error.starts_with("REQUIRED_TITLE:") {
                 ("title", "required_title")
+            } else if error.starts_with("INVALID_PAGES:") {
+                ("pages", "invalid_pages")
             } else {
                 ("publication_year", "invalid_year")
             };
@@ -365,6 +385,10 @@ fn parse_csv_delimited_with_cancel(
                 genre: optional("genre"),
                 ddc: optional("ddc"),
                 lcc: optional("lcc"),
+                tags: clean_string_list(cell("tags").split(';')),
+                identifiers: clean_string_list(cell("identifiers").split(';')),
+                language: optional("language"),
+                pages,
                 notes: optional("notes"),
                 cover_image: None,
                 created_at: now.clone(),
@@ -476,7 +500,7 @@ fn commit_preview_checked(
         return Err("CSV_DUPLICATES: Confirm importing duplicates as separate books.".into());
     }
     for row in &rows {
-        validate_book_fields(&row.book.title, row.book.publication_year)?;
+        validate_book_fields(&row.book.title, row.book.publication_year, row.book.pages)?;
         let mut book = row.book.clone();
         book.id = Uuid::new_v4().to_string();
         book.created_at = now_string();
@@ -838,6 +862,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_new_book_fields_and_rejects_invalid_page_counts() {
+        let source =
+            "title,tags,identifiers,language,pages\nBook,\" Reference ; Rust \",00123;AB-7,Français,240\n";
+        let preview = parse_csv(source.as_bytes(), &[]);
+        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+        let book = &preview.rows[0].book;
+        assert_eq!(book.tags, ["Reference", "Rust"]);
+        assert_eq!(book.identifiers, ["00123", "AB-7"]);
+        assert_eq!(book.language.as_deref(), Some("Français"));
+        assert_eq!(book.pages, Some(240));
+        let dir = tempdir().unwrap();
+        let connection = open_database(&dir.path().join("library.db")).unwrap();
+        assert_eq!(
+            commit_preview(&connection, &preview, true, true).unwrap(),
+            1
+        );
+        let saved = list_documents::<Book>(&connection, "books")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(saved.tags, ["Reference", "Rust"]);
+        assert_eq!(saved.identifiers, ["00123", "AB-7"]);
+        assert_eq!(saved.language.as_deref(), Some("Français"));
+        assert_eq!(saved.pages, Some(240));
+
+        for value in ["0", "-1", "1.5", "18446744073709551616"] {
+            let source = format!("title,pages\nBook,{value}\n");
+            let invalid = parse_csv(source.as_bytes(), &[]);
+            assert_eq!(invalid.errors.len(), 1, "{value}: {:?}", invalid.errors);
+            assert_eq!(invalid.errors[0].column, "pages");
+            assert_eq!(invalid.errors[0].code, "invalid_pages");
+        }
+    }
+
+    #[test]
     fn csv_limits_are_rejected_before_import() {
         let large = vec![b'a'; MAX_CSV_BYTES + 1];
         assert_eq!(
@@ -894,7 +953,7 @@ mod tests {
         assert!(list_documents::<Book>(&connection, "books")
             .unwrap()
             .is_empty());
-        assert!(validate_book_fields("Manual", Some(-1)).is_err());
+        assert!(validate_book_fields("Manual", Some(-1), None).is_err());
     }
 
     #[test]
@@ -1022,5 +1081,17 @@ mod tests {
         let preview = parse_csv(include_bytes!("../../examples/books.csv"), &[]);
         assert!(preview.errors.is_empty(), "{:?}", preview.errors);
         assert_eq!(preview.rows.len(), 3);
+        assert_eq!(preview.rows[0].book.pages, Some(320));
+        assert_eq!(preview.rows[0].book.identifiers, ["00123", "LOCAL-7"]);
+
+        let pipe = parse_csv_delimited(
+            include_bytes!("../../examples/books-pipe.csv"),
+            &[],
+            None,
+            String::new(),
+        );
+        assert!(pipe.errors.is_empty(), "{:?}", pipe.errors);
+        assert_eq!(pipe.rows.len(), 3);
+        assert_eq!(pipe.rows[0].book.tags, ["Fiction", "Community"]);
     }
 }

@@ -1,5 +1,5 @@
-title,isbn,authors,publisher,publication_year,genre,ddc,lcc,notes
-"A Library, Together",0012345678901,María Lectura;François Pages,Paper House,2024,Fiction,823.92,PR6100,"A story about ""shared shelves""."
-Reading Rooms,,Anne Reader,,2021,Essays,028.9,Z1003,"First line of notes.
+title,isbn,authors,publisher,publication_year,genre,ddc,lcc,tags,identifiers,language,pages,notes
+"A Library, Together",0012345678901,María Lectura;François Pages,Paper House,2024,Fiction,823.92,PR6100,"Fiction; Community",00123;LOCAL-7,English,320,"A story about ""shared shelves""."
+Reading Rooms,,Anne Reader,,2021,Essays,028.9,Z1003,"Libraries; Essays",,English,184,"First line of notes.
 Second line of notes."
-An Undated Book,,,,,,005.133,QA76.73.R87,No ISBN or publication year required.
+An Undated Book,,,,,,005.133,QA76.73.R87,,,,,No ISBN or publication year required.

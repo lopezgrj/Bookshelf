@@ -22,7 +22,8 @@ async function prepare(page, language = "en", libraryOpen = true) {
     window.testPreview = {
       token: "preview-1", delimiter: "|", errors: [], unknownColumns: [],
       rows: Array.from({ length: 121 }, (_, index) => ({ record: index + 2, duplicate: index === 0,
-        book: { title: `Imported ${index}`, authors: ["François"], ddc: "005.133", lcc: "QA76.73.R87" } })),
+        book: { title: `Imported ${index}`, authors: ["François"], ddc: "005.133", lcc: "QA76.73.R87",
+          tags: ["Reference"], identifiers: ["00123"], language: "Français", pages: 240 } })),
     };
     const normalize = (s) => String(s).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
     window.__TAURI_INTERNALS__ = {
@@ -84,14 +85,22 @@ for (const language of ["en", "es", "fr"]) {
     await dialog.getByLabel(t.title, { exact: true }).fill("A test book");
     await dialog.getByLabel(t.ddc, { exact: true }).fill("005.133");
     await dialog.getByLabel(t.lcc, { exact: true }).fill("QA76.73.R87");
+    await dialog.getByLabel(t.tags, { exact: true }).fill("Reference; Rust");
+    await dialog.getByLabel(t.identifiers, { exact: true }).fill("00123; LOCAL-7");
+    await dialog.getByLabel(t.contentLanguage, { exact: true }).fill("Français");
+    await dialog.getByLabel(t.pages, { exact: true }).fill("240");
     await dialog.getByRole("button", { name: t.save, exact: true }).click();
     await expect(dialog).not.toBeVisible();
     const saved = await page.evaluate(() => window.testCalls.find((call) => call.command === "save_book").args);
     expect(saved.ddc).toBe("005.133");
     expect(saved.lcc).toBe("QA76.73.R87");
+    expect(saved.tags).toEqual(["Reference", "Rust"]);
+    expect(saved.identifiers).toEqual(["00123", "LOCAL-7"]);
+    expect(saved.language).toBe("Français");
+    expect(saved.pages).toBe(240);
     await page.locator('#filters [name="search"]').fill("francais");
     await page.getByRole("button", { name: t.search, exact: true }).click();
-    await expect(page.locator(".book-card")).toHaveCount(1);
+    await expect(page.locator(".book-card")).toHaveCount(2);
     await page.locator(`[data-page="patrons"]`).click();
     await expect(page.getByText("François Pages", { exact: true })).toBeVisible();
     await page.locator(`[data-page="loans"]`).click();
@@ -114,6 +123,7 @@ for (const language of ["en", "es", "fr"]) {
     await expect(dialog.locator("tbody tr")).toHaveCount(50);
     await expect(dialog.getByRole("button", { name: t.confirm, exact: true })).toBeDisabled();
     await expect(dialog.locator("tbody").getByText("005.133", { exact: true }).first()).toBeVisible();
+    await expect(dialog.locator("tbody").getByText("240", { exact: true }).first()).toBeVisible();
     await dialog.getByLabel(t.confirmDuplicates).check();
     await dialog.getByRole("button", { name: t.next, exact: true }).click();
     await expect(dialog.locator("tbody tr")).toHaveCount(50);
