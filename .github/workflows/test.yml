@@ -1,0 +1,76 @@
+name: Application verification
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:ui -- --workers=2
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failure-traces
+          path: test-results/
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Linux desktop prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb
+      - run: npm ci
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: npm run tauri -- build --debug --no-bundle --target ${{ matrix.target }}
+      - name: Install native automation driver
+        if: runner.os != 'macOS'
+        run: cargo install tauri-driver --locked
+      - name: Install matching Windows WebView driver
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo install --git https://github.com/chippers/msedgedriver-tool
+          msedgedriver-tool
+          Add-Content $env:GITHUB_PATH (Get-Location)
+      - name: Linux real desktop test
+        if: runner.os == 'Linux'
+        env:
+          PAPER_LIBRARY_BINARY: src-tauri/target/x86_64-unknown-linux-gnu/debug/paper-library
+        run: xvfb-run -a npm run test:desktop
+      - name: Windows real desktop test
+        if: runner.os == 'Windows'
+        env:
+          PAPER_LIBRARY_BINARY: src-tauri/target/x86_64-pc-windows-msvc/debug/paper-library.exe
+        run: npm run test:desktop
