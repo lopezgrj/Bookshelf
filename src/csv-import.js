@@ -26,6 +26,7 @@ export async function importBooks({ language, onImported, notify, onStateChange 
       <option value="">${text("auto")}</option><option value=",">${text("comma")}</option><option value="|">${text("pipe")}</option>
     </select><p data-progress role="status" aria-live="polite"></p><progress aria-label="${text("working")}" hidden></progress>
     <div data-preview></div><div data-error class="csv-errors" role="alert" hidden></div>
+    <p data-blockers role="status" aria-live="polite"></p>
     <div class="modal-actions"><button class="button secondary" data-cancel>${text("cancel")}</button>
     <button class="button secondary" data-reselect>${text("chooseAgain")}</button>
     <button class="button primary" data-confirm disabled>${text("confirm")}</button></div>`;
@@ -49,9 +50,18 @@ export async function importBooks({ language, onImported, notify, onStateChange 
   };
   const update = () => {
     onStateChange({ open: !closed, busy });
-    confirm.disabled = busy || !preview || preview.errors.length > 0 || preview.rows.length === 0 || !preview.delimiter
-      || (!!preview.unknownColumns.length && !dialog.querySelector("[data-ignore]")?.checked)
-      || (!dialog.querySelector("[data-duplicates-label]")?.hidden && !dialog.querySelector("[data-duplicates]")?.checked);
+    const blockers = [];
+    if (preview?.errors.length) blockers.push(text("CSV_INVALID"));
+    if (preview && preview.rows.length === 0) blockers.push(text("empty"));
+    if (preview && !preview.delimiter) blockers.push(text("delimiter_required"));
+    if (preview?.unknownColumns.length && !dialog.querySelector("[data-ignore]")?.checked) {
+      blockers.push(text("CSV_UNKNOWN_COLUMNS"));
+    }
+    if (preview?.rows.some((row) => row.duplicate) && !dialog.querySelector("[data-duplicates]")?.checked) {
+      blockers.push(text("CSV_DUPLICATES"));
+    }
+    confirm.disabled = busy || !preview || blockers.length > 0;
+    dialog.querySelector("[data-blockers]").textContent = busy || !preview ? "" : blockers.join(" ");
     delimiter.disabled = busy;
     dialog.querySelector("[data-reselect]").disabled = busy;
   };
@@ -100,6 +110,8 @@ export async function importBooks({ language, onImported, notify, onStateChange 
         <li>${escape(text("location", { record: error.record, column: error.column || "—" }))}: ${escape(csvMessages[language][error.code] || text("error"))}</li>`).join("")}</ul></div>` : ""}
       ${preview.unknownColumns.length ? `<p>${escape(text("unknown", { columns: preview.unknownColumns.join(", ") }))}</p>
         <label class="csv-check"><input type="checkbox" data-ignore>${text("ignore")}</label>` : ""}
+      <label class="csv-check" data-duplicates-label ${preview.rows.some((row) => row.duplicate) ? "" : "hidden"}>
+        <input type="checkbox" data-duplicates>${text("confirmDuplicates")}</label>
       <div class="table-wrap csv-preview"><table><caption>${text("preview")}</caption><thead><tr>
         ${["record", "title", "authors", "year"].map((key) => `<th scope="col">${text(key)}</th>`).join("")}<th scope="col">ISBN</th>
         <th scope="col">DDC</th><th scope="col">LCC</th><th scope="col">${text("tags")}</th><th scope="col">${text("identifiers")}</th>
@@ -114,9 +126,7 @@ export async function importBooks({ language, onImported, notify, onStateChange 
       <div class="pagination"><button type="button" class="button secondary" data-page-step="-1" ${page === 1 ? "disabled" : ""}>${text("previous")}</button>
       <span>${text("page")} ${page} / ${pages}</span>
       <button type="button" class="button secondary" data-page-step="1" ${page >= pages ? "disabled" : ""}>${text("next")}</button></div>
-      ${!preview.rows.length ? `<p>${text("empty")}</p>` : ""}
-      <label class="csv-check" data-duplicates-label ${preview.rows.some((row) => row.duplicate) ? "" : "hidden"}>
-        <input type="checkbox" data-duplicates>${text("confirmDuplicates")}</label>`;
+      ${!preview.rows.length ? `<p>${text("empty")}</p>` : ""}`;
     dialog.querySelectorAll("[data-page-step]").forEach((button) => button.onclick = () => {
       const duplicates = dialog.querySelector("[data-duplicates]")?.checked;
       const ignore = dialog.querySelector("[data-ignore]")?.checked;

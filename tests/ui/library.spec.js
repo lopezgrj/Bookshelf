@@ -129,9 +129,11 @@ for (const language of ["en", "es", "fr"]) {
     const dialog = page.getByRole("dialog");
     await expect(dialog.locator("tbody tr")).toHaveCount(50);
     await expect(dialog.getByRole("button", { name: t.confirm, exact: true })).toBeDisabled();
+    await expect(dialog.locator("[data-blockers]")).toContainText(t.CSV_DUPLICATES);
     await expect(dialog.locator("tbody").getByText("005.133", { exact: true }).first()).toBeVisible();
     await expect(dialog.locator("tbody").getByText("240", { exact: true }).first()).toBeVisible();
     await dialog.getByLabel(t.confirmDuplicates).check();
+    await expect(dialog.locator("[data-blockers]")).toBeEmpty();
     await dialog.getByRole("button", { name: t.next, exact: true }).click();
     await expect(dialog.locator("tbody tr")).toHaveCount(50);
     await expect(dialog.getByLabel(t.confirmDuplicates)).toBeChecked();
@@ -347,4 +349,15 @@ test("cover source dialog supports file, clipboard image and HTTP URL", async ({
     (call) => call.command === "set_cover_from_url"
       && call.args.url === "http://example.com/cover.png",
   ))).toBe(true);
+});
+
+test("valid CSV preview enables import and explains every disabled state", async ({ page }) => {
+  await prepare(page);
+  await page.evaluate(() => {
+    window.testPreview.rows.forEach((row) => { row.duplicate = false; });
+  });
+  await page.locator("#import-books").click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.locator("[data-blockers]")).toBeEmpty();
+  await expect(dialog.getByRole("button", { name: csvMessages.en.confirm, exact: true })).toBeEnabled();
 });
