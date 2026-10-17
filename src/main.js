@@ -51,6 +51,12 @@ function errorMessage(error) {
     COVER_URL_DNS: "coverUrlError", COVER_URL_DOWNLOAD: "coverUrlError",
     COVER_URL_TIMEOUT: "coverUrlError", COVER_URL_REDIRECTS: "coverUrlError",
     COVER_URL_STATUS: "coverUrlError",
+    METADATA_QUERY_EMPTY: "metadataLookupError", METADATA_ORIGIN_BLOCKED: "metadataLookupError",
+    METADATA_TIMEOUT: "metadataLookupError", METADATA_OFFLINE: "metadataLookupError",
+    METADATA_REDIRECTS: "metadataLookupError", METADATA_QUOTA: "metadataQuota",
+    METADATA_STATUS: "metadataLookupError", METADATA_TOO_LARGE: "metadataLookupError",
+    METADATA_MALFORMED: "metadataLookupError", METADATA_NO_RESULTS: "metadataNoResults",
+    METADATA_EXPIRED: "metadataLookupError", METADATA_STALE: "metadataStale",
     COVER_MISSING: "invalidCoverAsset", COVER_INVALID: "invalidCoverAsset",
     NO_LIBRARY: "welcome", LIBRARY_NOT_FOUND: "missingLibrary",
     LIBRARY_LOCKED: "libraryLocked", SQLITE_BUSY: "databaseBusy",
@@ -182,7 +188,7 @@ function shell() {
   document.documentElement.lang = language;
   app.innerHTML = `<div class="shell"><aside class="sidebar">
     <div class="brand"><div class="brand-icon" aria-hidden="true">B</div><strong>${t("appTitle")}</strong></div>
-    <nav aria-label="${t("appTitle")}">${["books", "patrons", "loans", "settings"].map((name) =>
+    <nav aria-label="${t("appTitle")}">${["books", "authorsMenu", "patrons", "loans", "settings"].map((name) =>
       button(t(name), `data-page="${name}" ${page === name ? 'aria-current="page"' : ""}`, `nav-item ${page === name ? "selected" : ""}`)).join("")}</nav>
     <p class="sidebar-note">${escape(info?.libraryPath || t("welcome"))}</p></aside>
     <main class="main"><div id="global-error" class="error-panel" role="alert" hidden></div><div id="page"></div></main>
@@ -192,14 +198,14 @@ function shell() {
     settingsDirty = false;
     page = node.dataset.page;
     Object.keys(query).forEach((key) => delete query[key]);
-    Object.assign(query, { search: "", page: 1, pageSize: 50, sort: page === "loans" ? "dueDate" : page === "patrons" ? "name" : "title", descending: false });
+    Object.assign(query, { search: "", page: 1, pageSize: 50, sort: page === "loans" ? "dueDate" : page === "patrons" ? "name" : page === "authorsMenu" ? "author" : "title", descending: false });
     await loadPage();
   })));
 }
 
 function filters() {
   const sortOptions = page === "books" ? ["title", "author", "publicationYear"]
-    : page === "patrons" ? ["name", "patronIdentifier"] : ["dueDate"];
+    : page === "patrons" ? ["name", "patronIdentifier"] : page === "authorsMenu" ? ["author"] : ["dueDate"];
   return `<form id="filters" class="filters">
     <div>${field("search", query.search)}</div>
     <div>${select("sort", sortOptions.map((name) => [name, t(name === "dueDate" ? "due_date" : name)]), query.sort)}</div>
@@ -256,7 +262,8 @@ async function loadPage() {
   if (page === "settings") return settings();
   const target = document.querySelector("#page");
   target.innerHTML = `<p role="status">${t("loading")}</p>`;
-  const result = await invoke(`query_${page}`, { query: { ...query, patronLabel: undefined } });
+  const commandPage = page === "authorsMenu" ? "authors" : page;
+  const result = await invoke(`query_${commandPage}`, { query: { ...query, patronLabel: undefined } });
   if (sequence !== requestNumber) return;
   const lastPage = Math.max(1, Math.ceil(result.total / query.pageSize));
   if (query.page > lastPage) { query.page = lastPage; return loadPage(); }
@@ -264,9 +271,9 @@ async function loadPage() {
     ${button(t("listView"), `data-books-view="list" aria-pressed="${booksViewMode === "list"}"`)}
     ${button(t("gridView"), `data-books-view="grid" aria-pressed="${booksViewMode === "grid"}"`)}</div>`;
   const actions = page === "books" ? `${viewActions}${button(csvText(language, "import"), 'id="import-books"')}${button(t("addBook"), 'id="add-book"', "primary")}`
-    : page === "patrons" ? button(t("addPatron"), 'id="add-patron"', "primary") : button(t("checkout"), 'id="checkout"', "primary");
+    : page === "patrons" ? button(t("addPatron"), 'id="add-patron"', "primary") : page === "loans" ? button(t("checkout"), 'id="checkout"', "primary") : "";
   target.innerHTML = `<header class="page-header"><h1>${t(page)}</h1><div class="header-actions">${actions}</div></header>
-    ${filters()}${page === "books" ? booksView(result.items, booksViewMode) : page === "patrons" ? patronsView(result.items) : loansView(result.items)}
+    ${filters()}${page === "books" ? booksView(result.items, booksViewMode) : page === "authorsMenu" ? authorsView(result.items) : page === "patrons" ? patronsView(result.items) : loansView(result.items)}
     ${pagination(result)}`;
   wireList();
   document.querySelector("#add-book")?.addEventListener("click", () => act(() => bookForm()));
@@ -283,7 +290,10 @@ async function loadPage() {
     onStateChange: (state) => { csvState = state; },
     onImported: async (count) => { query.search = ""; query.page = 1; await loadPage(); toast(csvText(language, "imported", { count })); },
   })));
-  document.querySelectorAll("[data-book]").forEach((node) => node.onclick = () => act(() => bookDetail(result.items.find((book) => book.id === node.dataset.book))));
+  document.querySelectorAll("[data-book]").forEach((node) => node.onclick = () => act(() => {
+    const item = result.items.find((entry) => (entry.book || entry).id === node.dataset.book);
+    return bookDetail(item.book || item);
+  }));
   document.querySelectorAll("[data-patron]").forEach((node) => node.onclick = () => act(() => patronForm(result.items.find((patron) => patron.id === node.dataset.patron))));
   document.querySelectorAll("[data-deactivate]").forEach((node) => node.onclick = () => act(async () => {
     if (await confirmAction(t("deactivate"))) { await invoke("deactivate_patron", { id: node.dataset.deactivate }); await loadPage(); }
@@ -316,6 +326,17 @@ function booksView(items, mode) {
       ${book.coverImage ? `<img loading="lazy" class="book-cover" data-cover="${escape(book.id)}" alt="${escape(book.title)}">` : `<span class="cover-placeholder">${t("noCover")}</span>`}</button>
     <div class="book-copy"><h2>${escape(book.title)}</h2><p>${escape(book.authors.join("; "))}</p><p>${escape(book.ddc)} ${escape(book.lcc)}</p>
     <p>${t("copies")}: ${book.totalCopies} · ${t("available")}: ${book.availableCopies}</p>${button(t("edit"), `data-book="${escape(book.id)}"`)}</div></article>`).join("")}</section>`;
+}
+
+function authorsView(items) {
+  return `<div class="table-wrap"><table><caption>${t("authorsMenu")}</caption><thead><tr>
+    <th scope="col">${t("author")}</th><th scope="col">${t("books")}</th><th scope="col">ISBN</th>
+    <th scope="col">${t("copies")}</th><th scope="col">${t("available")}</th><th scope="col">${t("edit")}</th></tr></thead>
+    <tbody>${items.map(({ author, book }) => `<tr><td>${escape(author || t("unknownAuthor"))}</td>
+      <td><span class="author-book-title">${book.coverImage ? `<img loading="lazy" class="author-cover" data-cover="${escape(book.id)}" alt="">` : `<span class="author-cover-placeholder" aria-hidden="true">${t("noCover")}</span>`}${escape(book.title)}</span></td>
+      <td>${escape(book.isbn)}</td><td>${book.totalCopies}</td><td>${book.availableCopies}</td>
+      <td>${button(t("edit"), `data-book="${escape(book.id)}"`)}</td></tr>`).join("")}</tbody></table>
+    ${!items.length ? `<p>${t("empty")}</p>` : ""}</div>`;
 }
 
 function patronsView(items) {
@@ -404,6 +425,69 @@ async function coverSource(book, closeParent) {
   });
 }
 
+const metadataFields = ["title", "authors", "isbn", "publisher", "publicationYear", "genre",
+  "tags", "identifiers", "language", "pages"];
+
+const metadataValue = (value) => Array.isArray(value) ? value.join("; ") : String(value ?? "—");
+
+async function metadataLookup(book, closeParent) {
+  const sent = book.isbn
+    ? `ISBN: ${book.isbn}`
+    : `${t("title")}: ${book.title}\n${t("authors")}: ${book.authors.join("; ")}`;
+  if (!await confirmAction(`${t("metadataPrivacy")}\n\n${sent}`)) return;
+  const lookup = await runOperation((operationId) => invoke("lookup_book_metadata", {
+    bookId: book.id, operationId,
+  }));
+  if (!lookup) return;
+  const { dialog, close } = await modal(t("metadataReview"), `<p>${t("metadataApprovalHint")}</p>
+    <label for="metadata-candidate">${t("metadataCandidate")}</label>
+    <select id="metadata-candidate"><option value="">${t("chooseMetadataCandidate")}</option>
+      ${lookup.candidates.map((candidate) => `<option value="${escape(candidate.id)}">${escape(
+    `${candidate.title || t("untitled")} · ${candidate.authors?.join("; ") || t("unknownAuthor")}`,
+  )}</option>`).join("")}</select>
+    <div data-metadata-fields></div>
+    <div class="modal-actions">${button(t("applyMetadata"), "data-apply-metadata", "primary")}</div>`);
+  const candidateSelect = dialog.querySelector("#metadata-candidate");
+  const fields = dialog.querySelector("[data-metadata-fields]");
+  const apply = dialog.querySelector("[data-apply-metadata]");
+  apply.disabled = true;
+  const render = () => {
+    const candidate = lookup.candidates.find((item) => item.id === candidateSelect.value);
+    if (!candidate) {
+      fields.innerHTML = "";
+      apply.disabled = true;
+      return;
+    }
+    const changed = metadataFields.filter((field) => candidate[field] !== null
+      && candidate[field] !== undefined
+      && JSON.stringify(candidate[field]) !== JSON.stringify(lookup.current[field]));
+    fields.innerHTML = changed.length ? `<div class="metadata-fields">${changed.map((field) => {
+      const label = field === "isbn" ? "ISBN" : t(field === "language" ? "contentLanguage" : field);
+      return `<label class="metadata-field"><input type="checkbox" data-metadata-field="${field}">
+        <strong>${label}</strong><span>${escape(metadataValue(lookup.current[field]))}</span>
+        <span aria-hidden="true">→</span><span>${escape(metadataValue(candidate[field]))}</span></label>`;
+    }).join("")}</div>` : `<p>${t("metadataNoChanges")}</p>`;
+    fields.querySelectorAll("[data-metadata-field]").forEach((checkbox) => {
+      checkbox.onchange = () => {
+        apply.disabled = !fields.querySelector("[data-metadata-field]:checked");
+      };
+    });
+    apply.disabled = true;
+  };
+  candidateSelect.onchange = render;
+  apply.onclick = () => act(async () => {
+    const candidateId = candidateSelect.value;
+    const approvedFields = [...fields.querySelectorAll("[data-metadata-field]:checked")]
+      .map((checkbox) => checkbox.dataset.metadataField);
+    if (!candidateId || !approvedFields.length || !await confirmAction(t("confirmMetadata"))) return;
+    await invoke("apply_book_metadata", { token: lookup.token, candidateId, approvedFields });
+    await close(true);
+    await closeParent(true);
+    await loadPage();
+    toast(t("metadataApplied"));
+  });
+}
+
 async function bookDetail(book) {
   const { dialog, close } = await modal(book.title, `<div class="book-detail">
     <div class="detail-cover">${book.coverImage ? `<img data-cover="${escape(book.id)}" alt="${escape(book.title)}">` : `<span class="cover-placeholder">${t("noCover")}</span>`}</div>
@@ -413,9 +497,10 @@ async function bookDetail(book) {
       ["identifiers", book.identifiers?.join("; ")], ["contentLanguage", book.language], ["pages", book.pages],
       ["notes", book.notes],
     ].map(([key, value]) => `<dt>${key === "isbn" ? "ISBN" : t(key)}</dt><dd>${escape(value ?? "—")}</dd>`).join("")}</dl>
-    <p>${t("coverHint")}</p><div class="header-actions">${button(t("edit"), "data-edit")}${button(t("changeCover"), "data-cover-pick")}${book.coverImage ? button(t("removeCover"), "data-cover-remove") : ""}${button(t("deleteBook"), "data-delete")}</div></div></div>
+    <p>${t("coverHint")}</p><div class="header-actions">${button(t("edit"), "data-edit")}${button(t("lookupMetadata"), "data-metadata")}${button(t("changeCover"), "data-cover-pick")}${book.coverImage ? button(t("removeCover"), "data-cover-remove") : ""}${button(t("deleteBook"), "data-delete")}</div></div></div>
     <h3>${t("copies")}</h3><div id="copy-results"></div>${button(t("addCopy"), "data-add-copy")}`);
   dialog.querySelector("[data-edit]").onclick = () => act(async () => { await close(true); await bookForm(book); });
+  dialog.querySelector("[data-metadata]").onclick = () => act(() => metadataLookup(book, close));
   dialog.querySelector("[data-cover-pick]").onclick = () => act(() => coverSource(book, close));
   dialog.querySelector("[data-cover-remove]")?.addEventListener("click", () => act(async () => {
     if (!await confirmAction(t("removeCover"))) return;

@@ -48,6 +48,8 @@ Libraries and backups are **not encrypted** by the application. Protect them usi
 
 - Add/edit title, semicolon-separated authors, ISBN, publisher, year, genre, notes, DDC and LCC.
 - Display the Books catalog as a compact List or a cover-focused Grid. List is the default; the selected view is remembered across restarts and libraries without resetting the current search, sort, filters, or page.
+- Use **Authors** after **Books** to browse a flat author-ordered catalog. Multi-author books appear under every listed author; authorless books appear under **Unknown author**.
+- From book details, choose **Look up metadata** to query Open Library using the current ISBN or title/authors. Select a candidate and approve individual fields before saving; no field is selected by default and failed/cancelled lookups do not change the book. The request sends the displayed lookup fields to Open Library and is subject to its privacy policy, availability and rate limits.
 - Classifications are optional **text**, not numeric assignments or validated classifications. `005.133` and `QA76.73.R87` keep their notation, zeros, punctuation and internal spacing.
 - Add copies with unique identifiers and optional shelf locations, acquisition dates and notes. A copy's identifier is text, so leading zeros remain intact.
 - Register/edit patrons, then check out an available copy to an active patron. Default loan periods are 1–3650 calendar days (21 initially); the due date is checkout date plus that many days, and changing the default affects future checkouts only. Accept dates as `YYYY-MM-DD` and display them in the selected language.

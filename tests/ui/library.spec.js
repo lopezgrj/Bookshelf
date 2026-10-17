@@ -13,6 +13,9 @@ async function prepare(page, language = "en", libraryOpen = true) {
     }));
     const patrons = [{ id: "p1", name: "François Pages", patronIdentifier: "0001", active: true }];
     const copies = [{ id: "c1", bookId: "book-0", copyIdentifier: "00001", status: "available", bookTitle: books[0].title, location: "Étage 2" }];
+    const authorRows = books.flatMap((book) => book.authors.length
+      ? book.authors.map((author) => ({ author, book }))
+      : [{ author: null, book }]);
     const loans = [{ loan: { id: "l1", dueDate: "2025-01-03", closedAt: null }, bookTitle: books[0].title,
       patronName: patrons[0].name, copyIdentifier: "00001", copyStatus: "lost", overdue: true }];
     window.testCalls = [];
@@ -34,7 +37,11 @@ async function prepare(page, language = "en", libraryOpen = true) {
         window.testCalls.push({ command, args });
         if (window.testDelays[command]) {
           await new Promise((resolve) => setTimeout(resolve, window.testDelays[command]));
-          if (window.testCancelled === args.operationId) throw "CSV_CANCELLED: No changes saved";
+          if (window.testCancelled === args.operationId) {
+            throw command === "lookup_book_metadata"
+              ? "OPERATION_CANCELLED: Metadata lookup cancelled"
+              : "CSV_CANCELLED: No changes saved";
+          }
         }
         if (window.testErrors[command]) throw window.testErrors[command];
         if (command === "app_info") return { settings: { language: selectedLanguage, loanPeriodDays: 21 }, booksView: selectedBooksView, libraryOpen,
@@ -46,7 +53,7 @@ async function prepare(page, language = "en", libraryOpen = true) {
         if (command === "plugin:event|listen") return 1;
         if (command.startsWith("query_")) {
           const query = args.query || {};
-          let items = { query_books: books, query_patrons: patrons, query_copies: copies, query_loans: loans }[command];
+          let items = { query_books: books, query_authors: authorRows, query_patrons: patrons, query_copies: copies, query_loans: loans }[command];
           if (!items) throw new Error(`Unexpected query: ${command}`);
           if (query.search) items = items.filter((item) => normalize(JSON.stringify(item)).includes(normalize(query.search)));
           const total = items.length;
@@ -63,6 +70,28 @@ async function prepare(page, language = "en", libraryOpen = true) {
         }
         if (command === "cover_data") return "data:image/png;base64,AA==";
         if (command === "remove_cover") return;
+        if (command === "lookup_book_metadata") {
+          const current = books.find((book) => book.id === args.bookId);
+          return {
+            token: "metadata-1", current, queryFields: ["title", "authors"],
+            candidates: [{
+              id: "/works/OL1W", title: "Updated title", authors: ["New Author"],
+              isbn: "9780000000001", publisher: "Open Library Press", publicationYear: 2026,
+              genre: "Computers", tags: ["Computers"], identifiers: ["OTHER-1"],
+              language: "en", pages: 320,
+            }],
+          };
+        }
+        if (command === "apply_book_metadata") {
+          const book = books[0];
+          const candidate = {
+            title: "Updated title", authors: ["New Author"], isbn: "9780000000001",
+            publisher: "Open Library Press", publicationYear: 2026, genre: "Computers",
+            tags: ["Computers"], identifiers: ["OTHER-1"], language: "en", pages: 320,
+          };
+          args.approvedFields.forEach((field) => { book[field] = candidate[field]; });
+          return book;
+        }
         if (command === "delete_book") { books.splice(books.findIndex((book) => book.id === args.id), 1); return; }
         if (command === "resolve_lost_loan") { loans[0].loan.closedAt = "2025-01-05"; loans[0].loan.closureReason = "lost_resolved"; return; }
         if (command === "return_loan") { loans[0].loan.closedAt = "2025-01-05"; loans[0].loan.closureReason = "returned"; return; }
@@ -380,4 +409,62 @@ test("Books defaults to List and switching to Grid preserves catalog state", asy
   await expect.poll(() => page.evaluate(() => window.testCalls.filter(
     (call) => call.command === "query_books",
   ).at(-1).args.query)).toMatchObject({ page: 2, pageSize: 25 });
+});
+
+test("Authors follows Books and lists books by every author", async ({ page }) => {
+  await prepare(page);
+  const navigation = page.locator("nav .nav-item");
+  await expect(navigation.nth(0)).toHaveText(messages.en.books);
+  await expect(navigation.nth(1)).toHaveText(messages.en.authorsMenu);
+  await navigation.nth(1).click();
+  await expect(page.locator("main h1")).toHaveText(messages.en.authorsMenu);
+  await expect(page.locator("tbody tr")).toHaveCount(50);
+  await expect(page.locator("tbody tr").first()).toContainText("María Reader");
+  await page.locator('#filters [name="search"]').fill("maria");
+  await page.getByRole("button", { name: messages.en.search, exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.testCalls.filter(
+    (call) => call.command === "query_authors",
+  ).at(-1).args.query.search)).toBe("maria");
+});
+
+test("Open Library metadata requires candidate choice and field-by-field approval", async ({ page }) => {
+  await prepare(page);
+  await page.locator(".book-entry [data-book]").first().click();
+  await page.getByRole("button", { name: messages.en.lookupMetadata, exact: true }).click();
+  const disclosure = page.locator("dialog.confirmation");
+  await expect(disclosure).toContainText("Français en bibliothèque");
+  await disclosure.getByRole("button", { name: messages.en.confirm, exact: true }).click();
+
+  const review = page.locator("dialog[open]").last();
+  await expect(review.getByText(messages.en.metadataApprovalHint)).toBeVisible();
+  await expect(review.locator("[data-apply-metadata]")).toBeDisabled();
+  await review.getByLabel(messages.en.metadataCandidate).selectOption("/works/OL1W");
+  await expect(review.locator('[data-metadata-field="title"]')).not.toBeChecked();
+  await review.locator('[data-metadata-field="title"]').check();
+  await expect(review.locator("[data-apply-metadata]")).toBeEnabled();
+  await review.locator("[data-apply-metadata]").click();
+  await page.locator("dialog.confirmation").getByRole("button", { name: messages.en.confirm, exact: true }).click();
+
+  await expect.poll(() => page.evaluate(() => window.testCalls.find(
+    (call) => call.command === "apply_book_metadata",
+  )?.args.approvedFields)).toEqual(["title"]);
+  await expect(page.locator(".book-entry h2").first()).toHaveText("Updated title");
+});
+
+test("Open Library metadata lookup can be cancelled while waiting for the service", async ({ page }) => {
+  await prepare(page);
+  await page.evaluate(() => { window.testDelays.lookup_book_metadata = 5_000; });
+  await page.locator(".book-entry [data-book]").first().click();
+  await page.getByRole("button", { name: messages.en.lookupMetadata, exact: true }).click();
+  await page.locator("dialog.confirmation").getByRole(
+    "button", { name: messages.en.confirm, exact: true },
+  ).click();
+
+  const progress = page.locator("dialog").filter({
+    has: page.locator("[data-cancel-operation]"),
+  });
+  await progress.locator("[data-cancel-operation]").click();
+  await expect(progress.locator("[data-progress]")).toHaveText(messages.en.cancelRequested);
+  await expect(progress).toBeHidden({ timeout: 6_000 });
+  await expect(page.locator("dialog[open]").last()).toContainText(messages.en.cancelled);
 });

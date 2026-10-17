@@ -56,6 +56,12 @@ nav { display: grid; gap: 6px; }
 .list-book-main h2 { margin: 0; font: 600 16px "Playfair Display", Georgia, serif; }
 .list-book-main p { margin: 4px 0 0; }
 .list-book-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 16px; color: var(--muted); font-size: 11px; }
+.author-book-title { display: inline-flex; align-items: center; gap: 10px; }
+.author-cover { width: 32px; height: 44px; border-radius: 3px; object-fit: cover; background: #e9e7dc; }
+.author-cover-placeholder { display: inline-flex; width: 32px; height: 44px; align-items: center; justify-content: center; border-radius: 3px; color: var(--muted); background: #e9e7dc; font-size: 8px; }
+.metadata-fields { display: grid; gap: 8px; margin-top: 16px; }
+.metadata-field { display: grid; grid-template-columns: auto minmax(100px, .7fr) minmax(120px, 1fr) auto minmax(120px, 1fr); align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; }
+.metadata-field input { margin: 0; }
 .book-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(218px, 1fr)); gap: 19px; }
 .book-card { background: var(--paper); overflow: hidden; border: 1px solid #ebe8df; border-radius: 10px; box-shadow: 0 3px 12px #2b2b2010; transition: transform .16s ease, box-shadow .16s ease; }
 .book-card:hover { transform: translateY(-3px); box-shadow: 0 8px 22px #2b2b2014; }

@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 mod csv_import;
 mod library_archive;
+mod open_library;
 
 const SCHEMA_VERSION: i64 = 2;
 const MAX_LOAN_PERIOD_DAYS: u32 = 3650;
@@ -43,6 +44,7 @@ struct AppState {
     default_library_dir: PathBuf,
     testing_mode: bool,
     csv_preview: Mutex<Option<csv_import::ImportPreview>>,
+    metadata_lookups: Mutex<HashMap<String, open_library::MetadataLookupSession>>,
     cancelled_operations: Mutex<std::collections::HashSet<String>>,
     operation_status: Mutex<std::collections::HashMap<String, OperationStatus>>,
     startup_error: Mutex<Option<String>>,
@@ -217,6 +219,24 @@ struct BookQuery {
     descending: bool,
     #[serde(default)]
     available_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorQuery {
+    #[serde(default)]
+    search: String,
+    #[serde(default = "default_page")]
+    page: usize,
+    #[serde(default = "default_page_size")]
+    page_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorBookView {
+    author: Option<String>,
+    book: BookView,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1166,6 +1186,7 @@ fn open_library_internal(state: &AppState, directory: &Path) -> Result<(), Strin
     *old_lock = Some(lock_file);
     *state.library_open.lock().map_err(app_error)? = true;
     *state.csv_preview.lock().map_err(app_error)? = None;
+    state.metadata_lookups.lock().map_err(app_error)?.clear();
     *state.startup_error.lock().map_err(app_error)? = None;
     Ok(())
 }
@@ -1386,12 +1407,26 @@ fn save_book(
         updated_at: now,
         extra,
     };
-    let mut book = book;
-    let renamed_cover = if let Some(cover) = previous_cover.as_ref() {
-        let relative = cover_relative_path(&book.title, &id, cover_extension(cover)?);
+    let (book, previous_cover_path) =
+        persist_book_update(&connection, &library_dir, previous_cover.as_ref(), book)?;
+    drop(connection);
+    if let Some(previous_path) = previous_cover_path {
+        cleanup_cover_if_unreferenced(&state, &library_dir, &previous_path)?;
+    }
+    Ok(book)
+}
+
+fn persist_book_update(
+    connection: &Connection,
+    library_dir: &Path,
+    previous_cover: Option<&CoverImage>,
+    mut book: Book,
+) -> Result<(Book, Option<String>), String> {
+    let renamed_cover = if let Some(cover) = previous_cover {
+        let relative = cover_relative_path(&book.title, &book.id, cover_extension(cover)?);
         if relative != cover.path {
-            let source = managed_cover_path(&library_dir, &cover.path)?;
-            let destination = managed_cover_path(&library_dir, &relative)?;
+            let source = managed_cover_path(library_dir, &cover.path)?;
+            let destination = managed_cover_path(library_dir, &relative)?;
             let mut input = fs::File::open(source).map_err(app_error)?;
             let mut output = fs::OpenOptions::new()
                 .write(true)
@@ -1419,18 +1454,14 @@ fn save_book(
     };
     let tx = connection.unchecked_transaction().map_err(app_error)?;
     let commit_result =
-        save_document(&tx, "books", &id, &book).and_then(|()| tx.commit().map_err(app_error));
+        save_document(&tx, "books", &book.id, &book).and_then(|()| tx.commit().map_err(app_error));
     if let Err(error) = commit_result {
         if let Some((_, staged)) = renamed_cover.as_ref() {
-            let _ = remove_managed_cover(&library_dir, staged);
+            let _ = remove_managed_cover(library_dir, staged);
         }
         return Err(error);
     }
-    drop(connection);
-    if let Some((previous_path, _)) = renamed_cover {
-        cleanup_cover_if_unreferenced(&state, &library_dir, &previous_path)?;
-    }
-    Ok(book)
+    Ok((book, renamed_cover.map(|(previous, _)| previous)))
 }
 
 #[tauri::command]
@@ -2037,6 +2068,89 @@ fn query_books_backend(
             ),
         };
         order.then_with(|| left.book.id.cmp(&right.book.id))
+    });
+    Ok(page_of(items, page, page_size))
+}
+
+#[tauri::command]
+fn query_authors(
+    state: State<'_, AppState>,
+    query: AuthorQuery,
+) -> Result<Page<AuthorBookView>, String> {
+    ensure_library_open(&state)?;
+    let connection = state.connection.lock().map_err(app_error)?;
+    query_authors_backend(&connection, query)
+}
+
+fn query_authors_backend(
+    connection: &Connection,
+    query: AuthorQuery,
+) -> Result<Page<AuthorBookView>, String> {
+    let (page, page_size) = validate_pagination(query.page, query.page_size)?;
+    let books: Vec<Book> = list_documents(connection, "books")?;
+    let copies: Vec<CopyRecord> = list_documents(connection, "copies")?;
+    let mut copies_by_book: HashMap<&str, Vec<&CopyRecord>> = HashMap::new();
+    for copy in &copies {
+        copies_by_book.entry(&copy.book_id).or_default().push(copy);
+    }
+    let needle = search_key(query.search.trim());
+    let mut items = Vec::new();
+    for book in books {
+        validate_schema(book.schema_version)?;
+        let related = copies_by_book
+            .get(book.id.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let view = BookView {
+            total_copies: related.len(),
+            available_copies: related
+                .iter()
+                .filter(|copy| copy.status == "available")
+                .count(),
+            book,
+        };
+        let mut seen = std::collections::HashSet::new();
+        let authors: Vec<Option<String>> = if view.book.authors.is_empty() {
+            vec![None]
+        } else {
+            view.book
+                .authors
+                .iter()
+                .filter_map(|author| {
+                    let key = identity_key(author);
+                    seen.insert(key).then(|| Some(author.clone()))
+                })
+                .collect()
+        };
+        for author in authors {
+            let matches = needle.is_empty()
+                || author
+                    .as_deref()
+                    .is_some_and(|value| search_key(value).contains(&needle))
+                || search_key(&view.book.title).contains(&needle);
+            if matches {
+                items.push(AuthorBookView {
+                    author,
+                    book: view.clone(),
+                });
+            }
+        }
+    }
+    items.sort_by(|left, right| {
+        optional_order(
+            left.author.as_deref().map(search_key),
+            right.author.as_deref().map(search_key),
+            false,
+        )
+        .then_with(|| {
+            optional_order(
+                Some(search_key(&left.book.book.title)),
+                Some(search_key(&right.book.book.title)),
+                false,
+            )
+        })
+        .then_with(|| left.author.cmp(&right.author))
+        .then_with(|| left.book.book.id.cmp(&right.book.book.id))
     });
     Ok(page_of(items, page, page_size))
 }
@@ -2759,6 +2873,7 @@ mod tests {
             default_library_dir: root.join("default-library"),
             testing_mode: true,
             csv_preview: Mutex::new(None),
+            metadata_lookups: Mutex::new(HashMap::new()),
             cancelled_operations: Mutex::new(Default::default()),
             operation_status: Mutex::new(Default::default()),
             startup_error: Mutex::new(None),
@@ -2912,6 +3027,51 @@ mod tests {
         write_application_settings(&path, "en", None, "grid").unwrap();
         assert_eq!(read_application_settings(&path).unwrap().books_view, "grid");
         assert!(write_application_settings(&path, "en", None, "table").is_err());
+    }
+
+    #[test]
+    fn authors_query_orders_deduplicates_and_repeats_multi_author_books() {
+        let connection = open_database(Path::new(":memory:")).unwrap();
+        let (mut book, _, _) = seed_lending_records(&connection);
+        book.authors = vec![
+            "Zoë Writer".into(),
+            "Ana Author".into(),
+            "ana author".into(),
+        ];
+        let mut authorless = book.clone();
+        authorless.id = "book-authorless".into();
+        authorless.title = "No Author".into();
+        authorless.authors.clear();
+        let tx = connection.unchecked_transaction().unwrap();
+        save_document(&tx, "books", &book.id, &book).unwrap();
+        save_document(&tx, "books", &authorless.id, &authorless).unwrap();
+        tx.commit().unwrap();
+
+        let result = query_authors_backend(
+            &connection,
+            AuthorQuery {
+                search: String::new(),
+                page: 1,
+                page_size: 50,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.total, 3);
+        assert_eq!(result.items[0].author.as_deref(), Some("Ana Author"));
+        assert_eq!(result.items[1].author.as_deref(), Some("Zoë Writer"));
+        assert_eq!(result.items[2].author, None);
+
+        let filtered = query_authors_backend(
+            &connection,
+            AuthorQuery {
+                search: "zoe".into(),
+                page: 1,
+                page_size: 25,
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.items[0].book.book.id, book.id);
     }
 
     #[test]
@@ -3769,6 +3929,7 @@ pub fn run() {
                 default_library_dir,
                 testing_mode,
                 csv_preview: Mutex::new(None),
+                metadata_lookups: Mutex::new(HashMap::new()),
                 cancelled_operations: Mutex::new(std::collections::HashSet::new()),
                 operation_status: Mutex::new(std::collections::HashMap::new()),
                 startup_error: Mutex::new(startup_error),
@@ -3788,6 +3949,7 @@ pub fn run() {
             cancel_operation,
             list_books,
             query_books,
+            query_authors,
             save_book,
             delete_book,
             list_copies,
@@ -3810,6 +3972,8 @@ pub fn run() {
             set_cover_from_url,
             remove_cover,
             cover_data,
+            open_library::lookup_book_metadata,
+            open_library::apply_book_metadata,
             csv_import::preview_book_csv,
             csv_import::import_book_csv,
             csv_import::cancel_book_csv
