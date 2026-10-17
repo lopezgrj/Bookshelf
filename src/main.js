@@ -9,6 +9,7 @@ import "./style.css";
 
 let language = "en";
 let page = "books";
+let booksViewMode = "list";
 let info;
 let requestNumber = 0;
 let coverObserver;
@@ -248,6 +249,7 @@ async function loadPage() {
   info = await invoke("app_info");
   if (sequence !== requestNumber) return;
   language = info.settings.language;
+  booksViewMode = info.booksView || "list";
   shell();
   await getCurrentWindow().setTitle(t("appTitle"));
   if (!info.libraryOpen && page !== "settings") return welcome();
@@ -258,15 +260,24 @@ async function loadPage() {
   if (sequence !== requestNumber) return;
   const lastPage = Math.max(1, Math.ceil(result.total / query.pageSize));
   if (query.page > lastPage) { query.page = lastPage; return loadPage(); }
-  const actions = page === "books" ? `${button(csvText(language, "import"), 'id="import-books"')}${button(t("addBook"), 'id="add-book"', "primary")}`
+  const viewActions = `<div class="view-toggle" role="group" aria-label="${t("displayMode")}">
+    ${button(t("listView"), `data-books-view="list" aria-pressed="${booksViewMode === "list"}"`)}
+    ${button(t("gridView"), `data-books-view="grid" aria-pressed="${booksViewMode === "grid"}"`)}</div>`;
+  const actions = page === "books" ? `${viewActions}${button(csvText(language, "import"), 'id="import-books"')}${button(t("addBook"), 'id="add-book"', "primary")}`
     : page === "patrons" ? button(t("addPatron"), 'id="add-patron"', "primary") : button(t("checkout"), 'id="checkout"', "primary");
   target.innerHTML = `<header class="page-header"><h1>${t(page)}</h1><div class="header-actions">${actions}</div></header>
-    ${filters()}${page === "books" ? booksView(result.items) : page === "patrons" ? patronsView(result.items) : loansView(result.items)}
+    ${filters()}${page === "books" ? booksView(result.items, booksViewMode) : page === "patrons" ? patronsView(result.items) : loansView(result.items)}
     ${pagination(result)}`;
   wireList();
   document.querySelector("#add-book")?.addEventListener("click", () => act(() => bookForm()));
   document.querySelector("#add-patron")?.addEventListener("click", () => act(() => patronForm()));
   document.querySelector("#checkout")?.addEventListener("click", () => act(checkoutForm));
+  document.querySelectorAll("[data-books-view]").forEach((node) => node.addEventListener("click", () => act(async () => {
+    const selected = node.dataset.booksView;
+    if (selected === booksViewMode) return;
+    booksViewMode = await invoke("update_books_view", { booksView: selected });
+    await loadPage();
+  })));
   document.querySelector("#import-books")?.addEventListener("click", () => act(() => importBooks({
     language, notify: toast,
     onStateChange: (state) => { csvState = state; },
@@ -289,9 +300,18 @@ async function loadPage() {
   lazyCovers();
 }
 
-function booksView(items) {
+function booksView(items, mode) {
   if (!items.length) return `<p class="empty-state">${t("empty")}</p>`;
-  return `<section class="book-grid" aria-label="${t("books")}">${items.map((book) => `<article class="book-card">
+  if (mode === "list") {
+    return `<section class="book-list" aria-label="${t("books")}">${items.map((book) => `<article class="book-entry book-list-row">
+      <button type="button" class="list-cover-button" data-book="${escape(book.id)}" aria-label="${escape(book.title)}">
+        ${book.coverImage ? `<img loading="lazy" class="book-cover" data-cover="${escape(book.id)}" alt="${escape(book.title)}">` : `<span class="cover-placeholder">${t("noCover")}</span>`}</button>
+      <div class="list-book-main"><h2>${escape(book.title)}</h2>${book.authors[0] ? `<p class="book-author">${escape(book.authors[0])}</p>` : ""}</div>
+      <div class="list-book-meta">${book.isbn ? `<span>ISBN ${escape(book.isbn)}</span>` : ""}
+        <span>${t("copies")}: ${book.totalCopies}</span><span>${t("available")}: ${book.availableCopies}</span></div>
+      ${button(t("edit"), `data-book="${escape(book.id)}"`)}</article>`).join("")}</section>`;
+  }
+  return `<section class="book-grid" aria-label="${t("books")}">${items.map((book) => `<article class="book-entry book-card">
     <button type="button" class="cover-button" data-book="${escape(book.id)}" aria-label="${escape(book.title)}">
       ${book.coverImage ? `<img loading="lazy" class="book-cover" data-cover="${escape(book.id)}" alt="${escape(book.title)}">` : `<span class="cover-placeholder">${t("noCover")}</span>`}</button>
     <div class="book-copy"><h2>${escape(book.title)}</h2><p>${escape(book.authors.join("; "))}</p><p>${escape(book.ddc)} ${escape(book.lcc)}</p>

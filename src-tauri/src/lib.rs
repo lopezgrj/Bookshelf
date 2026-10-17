@@ -39,6 +39,7 @@ struct AppState {
     library_lock: Mutex<Option<std::fs::File>>,
     app_settings_path: PathBuf,
     app_language: Mutex<String>,
+    books_view: Mutex<String>,
     default_library_dir: PathBuf,
     testing_mode: bool,
     csv_preview: Mutex<Option<csv_import::ImportPreview>>,
@@ -173,6 +174,7 @@ struct Settings {
 #[serde(rename_all = "camelCase")]
 struct AppInfo {
     settings: Settings,
+    books_view: String,
     database_path: String,
     library_open: bool,
     library_path: Option<String>,
@@ -496,6 +498,12 @@ fn validate_book_fields(
 struct ApplicationSettings {
     language: String,
     library_path: Option<String>,
+    #[serde(default = "default_books_view")]
+    books_view: String,
+}
+
+fn default_books_view() -> String {
+    "list".into()
 }
 
 impl Default for ApplicationSettings {
@@ -503,6 +511,7 @@ impl Default for ApplicationSettings {
         Self {
             language: "en".into(),
             library_path: None,
+            books_view: default_books_view(),
         }
     }
 }
@@ -521,6 +530,12 @@ fn read_application_settings(path: &Path) -> Result<ApplicationSettings, String>
             settings.language
         ));
     }
+    if !["list", "grid"].contains(&settings.books_view.as_str()) {
+        return Err(format!(
+            "UNSUPPORTED_BOOKS_VIEW: Configured Books view '{}' is not supported; select list or grid.",
+            settings.books_view
+        ));
+    }
     Ok(settings)
 }
 
@@ -528,13 +543,18 @@ fn write_application_settings(
     path: &Path,
     language: &str,
     library_path: Option<String>,
+    books_view: &str,
 ) -> Result<(), String> {
     if !["en", "es", "fr"].contains(&language) {
         return Err("UNSUPPORTED_LANGUAGE: Choose English, Spanish, or French.".into());
     }
+    if !["list", "grid"].contains(&books_view) {
+        return Err("UNSUPPORTED_BOOKS_VIEW: Choose List or Grid.".into());
+    }
     let settings = ApplicationSettings {
         language: language.to_owned(),
         library_path,
+        books_view: books_view.to_owned(),
     };
     let bytes = serde_json::to_vec_pretty(&settings).map_err(app_error)?;
     fs::write(path, bytes).map_err(app_error)
@@ -1027,6 +1047,7 @@ fn app_info(state: State<'_, AppState>) -> Result<AppInfo, String> {
     let library_dir = state.library_dir.lock().map_err(app_error)?;
     Ok(AppInfo {
         settings,
+        books_view: state.books_view.lock().map_err(app_error)?.clone(),
         database_path: if library_open {
             database_path.display().to_string()
         } else {
@@ -1073,10 +1094,37 @@ fn update_settings(
     } else {
         None
     };
-    write_application_settings(&state.app_settings_path, &language, library_path)?;
+    let books_view = state.books_view.lock().map_err(app_error)?.clone();
+    write_application_settings(
+        &state.app_settings_path,
+        &language,
+        library_path,
+        &books_view,
+    )?;
     *state.app_language.lock().map_err(app_error)? = language.clone();
     settings.language = language;
     Ok(settings)
+}
+
+#[tauri::command]
+fn update_books_view(state: State<'_, AppState>, books_view: String) -> Result<String, String> {
+    if !["list", "grid"].contains(&books_view.as_str()) {
+        return Err("UNSUPPORTED_BOOKS_VIEW: Choose List or Grid.".into());
+    }
+    let language = state.app_language.lock().map_err(app_error)?.clone();
+    let library_path = if *state.library_open.lock().map_err(app_error)? {
+        Some(current_library_dir(&state)?.display().to_string())
+    } else {
+        None
+    };
+    write_application_settings(
+        &state.app_settings_path,
+        &language,
+        library_path,
+        &books_view,
+    )?;
+    *state.books_view.lock().map_err(app_error)? = books_view.clone();
+    Ok(books_view)
 }
 
 #[tauri::command]
@@ -1104,10 +1152,12 @@ fn open_library_internal(state: &AppState, directory: &Path) -> Result<(), Strin
     }
     let (connection, lock_file) = open_existing_library(&directory)?;
     let language = state.app_language.lock().map_err(app_error)?.clone();
+    let books_view = state.books_view.lock().map_err(app_error)?.clone();
     write_application_settings(
         &state.app_settings_path,
         &language,
         Some(directory.display().to_string()),
+        &books_view,
     )?;
     *state.connection.lock().map_err(app_error)? = connection;
     *state.database_path.lock().map_err(app_error)? = directory.join("library.sqlite3");
@@ -2705,6 +2755,7 @@ mod tests {
             library_lock: Mutex::new(None),
             app_settings_path: root.join("application-settings.json"),
             app_language: Mutex::new("fr".into()),
+            books_view: Mutex::new(default_books_view()),
             default_library_dir: root.join("default-library"),
             testing_mode: true,
             csv_preview: Mutex::new(None),
@@ -2817,6 +2868,7 @@ mod tests {
         open_library_internal(&state, &original).unwrap();
         let settings = read_application_settings(&state.app_settings_path).unwrap();
         assert_eq!(settings.language, "fr");
+        assert_eq!(settings.books_view, "list");
         assert_eq!(settings.library_path.as_deref(), original.to_str());
         drop(state);
         fs::rename(&original, &moved).unwrap();
@@ -2842,12 +2894,24 @@ mod tests {
         let (connection, _lock) =
             open_existing_library(Path::new(settings.library_path.as_ref().unwrap())).unwrap();
         assert_eq!(settings.language, "fr");
+        assert_eq!(settings.books_view, "list");
         assert_eq!(
             list_documents::<CopyRecord>(&connection, "copies")
                 .unwrap()
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn application_books_view_defaults_to_list_and_persists_grid() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("application-settings.json");
+        fs::write(&path, br#"{"language":"en","libraryPath":null}"#).unwrap();
+        assert_eq!(read_application_settings(&path).unwrap().books_view, "list");
+        write_application_settings(&path, "en", None, "grid").unwrap();
+        assert_eq!(read_application_settings(&path).unwrap().books_view, "grid");
+        assert!(write_application_settings(&path, "en", None, "table").is_err());
     }
 
     #[test]
@@ -3635,6 +3699,7 @@ pub fn run() {
                 Err(error) => (ApplicationSettings::default(), Some(error)),
             };
             let mut app_language = application_settings.language.clone();
+            let books_view = application_settings.books_view.clone();
             let default_library_dir = data_dir.join("default-library");
             let mut active_connection = Connection::open_in_memory()?;
             let mut active_library_dir = default_library_dir.clone();
@@ -3675,6 +3740,7 @@ pub fn run() {
                                     &settings_path,
                                     &app_language,
                                     Some(directory.display().to_string()),
+                                    &books_view,
                                 ) {
                                     startup_error = Some(error);
                                 }
@@ -3699,6 +3765,7 @@ pub fn run() {
                 library_lock: Mutex::new(active_lock),
                 app_settings_path: settings_path,
                 app_language: Mutex::new(app_language),
+                books_view: Mutex::new(books_view),
                 default_library_dir,
                 testing_mode,
                 csv_preview: Mutex::new(None),
@@ -3711,6 +3778,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             update_settings,
+            update_books_view,
             switch_database,
             create_library,
             open_library,

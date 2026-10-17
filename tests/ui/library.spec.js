@@ -6,6 +6,7 @@ import { csvMessages } from "../../src/csv-locales.js";
 async function prepare(page, language = "en", libraryOpen = true) {
   await page.addInitScript(({ language, libraryOpen }) => {
     let selectedLanguage = language;
+    let selectedBooksView = "list";
     const books = Array.from({ length: 121 }, (_, index) => ({
       id: `book-${index}`, title: index ? `Book ${String(index).padStart(3, "0")}` : "Français en bibliothèque",
       authors: ["María Reader"], ddc: "005.133", lcc: "QA76.73.R87", totalCopies: 1, availableCopies: 1,
@@ -36,9 +37,10 @@ async function prepare(page, language = "en", libraryOpen = true) {
           if (window.testCancelled === args.operationId) throw "CSV_CANCELLED: No changes saved";
         }
         if (window.testErrors[command]) throw window.testErrors[command];
-        if (command === "app_info") return { settings: { language: selectedLanguage, loanPeriodDays: 21 }, libraryOpen,
+        if (command === "app_info") return { settings: { language: selectedLanguage, loanPeriodDays: 21 }, booksView: selectedBooksView, libraryOpen,
           libraryPath: "/tmp/test-library", defaultLibraryPath: "/tmp/PaperLibrary" };
         if (command === "update_settings") { selectedLanguage = args.language; return; }
+        if (command === "update_books_view") { selectedBooksView = args.booksView; return selectedBooksView; }
         if (command === "plugin:dialog|open" || command === "plugin:dialog|save") return window.testFile;
         if (command === "plugin:window|set_title" || command === "plugin:window|close") return;
         if (command === "plugin:event|listen") return 1;
@@ -83,7 +85,7 @@ for (const language of ["en", "es", "fr"]) {
     const t = messages[language];
     await prepare(page, language);
     await expect(page.locator("html")).toHaveAttribute("lang", language);
-    await expect(page.locator(".book-card")).toHaveCount(50);
+    await expect(page.locator(".book-entry")).toHaveCount(50);
     await page.getByRole("button", { name: t.addBook, exact: true }).click();
     const dialog = page.getByRole("dialog");
     await page.getByRole("button", { name: t.save, exact: true }).click();
@@ -107,7 +109,7 @@ for (const language of ["en", "es", "fr"]) {
     expect(saved.pages).toBe(240);
     await page.locator('#filters [name="search"]').fill("francais");
     await page.getByRole("button", { name: t.search, exact: true }).click();
-    await expect(page.locator(".book-card")).toHaveCount(2);
+    await expect(page.locator(".book-entry")).toHaveCount(2);
     await page.locator(`[data-page="patrons"]`).click();
     await expect(page.getByText("François Pages", { exact: true })).toBeVisible();
     await page.locator(`[data-page="loans"]`).click();
@@ -153,12 +155,12 @@ for (const language of ["en", "es", "fr"]) {
 test("pagination resets search and errors are actionable without losing form values", async ({ page }) => {
   await prepare(page);
   await page.locator('[name="pageSize"]').selectOption("25");
-  await expect(page.locator(".book-card")).toHaveCount(25);
+  await expect(page.locator(".book-entry")).toHaveCount(25);
   await page.getByRole("button", { name: "Next", exact: true }).click();
-  await expect(page.locator(".book-card h2").first()).toHaveText("Book 025");
+  await expect(page.locator(".book-entry h2").first()).toHaveText("Book 025");
   await page.locator('#filters [name="search"]').fill("Book 001");
   await page.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(page.locator(".book-card h2").first()).toHaveText("Book 001");
+  await expect(page.locator(".book-entry h2").first()).toHaveText("Book 001");
   await page.evaluate(() => { window.testErrors.save_book = "SQLITE_BUSY: Another writer is using the library."; });
   await page.getByRole("button", { name: "Add book", exact: true }).click();
   await page.getByRole("dialog").getByLabel("Title", { exact: true }).fill("Unsaved");
@@ -173,7 +175,7 @@ test("pagination resets search and errors are actionable without losing form val
 
 test("destructive action is confirmed and backend error is visible in the open dialog", async ({ page }) => {
   await prepare(page);
-  await page.locator(".book-card").first().getByRole("button", { name: "Edit", exact: true }).click();
+  await page.locator(".book-entry").first().getByRole("button", { name: "Edit", exact: true }).click();
   await page.getByRole("button", { name: "Delete book", exact: true }).click();
   await page.getByRole("dialog", { name: "Confirm this action?" }).getByRole("button", { name: "Cancel", exact: true }).click();
   expect(await page.evaluate(() => window.testCalls.filter((call) => call.command === "delete_book").length)).toBe(0);
@@ -300,7 +302,7 @@ test("settings changes require discard confirmation before switching pages", asy
 
 test("copy search, location, sort and page-size controls submit their own non-nested form", async ({ page }) => {
   await prepare(page);
-  await page.locator(".book-card").first().getByRole("button", { name: "Edit", exact: true }).click();
+  await page.locator(".book-entry").first().getByRole("button", { name: "Edit", exact: true }).click();
   const form = page.locator("dialog .copy-filters");
   expect(await form.evaluate((node) => node.parentElement.closest("form") === null)).toBe(true);
   await form.locator('[name="search"]').fill("00001");
@@ -333,7 +335,7 @@ test("invalid CSV preview errors are paginated instead of rendering the entire e
 
 test("cover source dialog supports file, clipboard image and HTTP URL", async ({ page }) => {
   await prepare(page);
-  await page.locator(".book-card [data-book]").first().click();
+  await page.locator(".book-entry [data-book]").first().click();
   await page.getByRole("button", { name: messages.en.changeCover, exact: true }).click();
   await expect(page.getByRole("button", { name: messages.en.coverFromFile, exact: true })).toBeVisible();
   await page.getByRole("button", { name: messages.en.coverFromClipboard, exact: true }).click();
@@ -341,7 +343,7 @@ test("cover source dialog supports file, clipboard image and HTTP URL", async ({
     (call) => call.command === "set_cover_from_clipboard",
   ))).toBe(true);
 
-  await page.locator(".book-card [data-book]").first().click();
+  await page.locator(".book-entry [data-book]").first().click();
   await page.getByRole("button", { name: messages.en.changeCover, exact: true }).click();
   await page.getByLabel(messages.en.coverUrl, { exact: true }).fill("http://example.com/cover.png");
   await page.getByRole("button", { name: messages.en.coverFromUrl, exact: true }).click();
@@ -360,4 +362,22 @@ test("valid CSV preview enables import and explains every disabled state", async
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator("[data-blockers]")).toBeEmpty();
   await expect(dialog.getByRole("button", { name: csvMessages.en.confirm, exact: true })).toBeEnabled();
+});
+
+test("Books defaults to List and switching to Grid preserves catalog state", async ({ page }) => {
+  await prepare(page);
+  await expect(page.locator(".book-list")).toBeVisible();
+  await expect(page.getByRole("button", { name: messages.en.listView, exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.locator('select[name="pageSize"]').selectOption("25");
+  await page.getByRole("button", { name: messages.en.next, exact: true }).click();
+  await expect(page.locator(".book-entry h2").first()).toHaveText("Book 025");
+
+  await page.getByRole("button", { name: messages.en.gridView, exact: true }).click();
+  await expect(page.locator(".book-grid")).toBeVisible();
+  await expect(page.locator(".book-entry")).toHaveCount(25);
+  await expect(page.locator(".book-entry h2").first()).toHaveText("Book 025");
+  await expect(page.getByRole("button", { name: messages.en.gridView, exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(() => page.evaluate(() => window.testCalls.filter(
+    (call) => call.command === "query_books",
+  ).at(-1).args.query)).toMatchObject({ page: 2, pageSize: 25 });
 });

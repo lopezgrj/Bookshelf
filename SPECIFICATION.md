@@ -108,6 +108,8 @@ The Tauri desktop interface must provide screens or equivalent workflows for:
 - Adding and updating physical copies, viewing their status and shelf location, and recording loss, recovery, withdrawal, or loss resolution.
 - Registering, searching, editing, and deactivating patrons.
 - Checking out and returning copies, and viewing active and overdue loans.
+- Reviewing books ordered by author from an **Authors** main-menu destination placed immediately after **Books**.
+- Looking up proposed metadata for an existing book through the Google Books API and approving or rejecting each changed field before saving.
 - Choosing the interface language, selecting the Books list/grid display mode, and configuring the loan period and library location.
 - Creating, validating, and restoring library backups.
 
@@ -181,6 +183,31 @@ Unknown columns must be explicitly acknowledged in the preview before import can
 - Reject archive paths that escape the destination, absolute paths, and symlink entries. Clean up only staged restore artifacts on failure; keep the original library and backup unchanged.
 - Provide progress and cancellation during snapshot creation, asset collection, validation, and archive staging. Disable cancellation only during finalization, clearly indicate that phase, and report whether the archive was finalized. Provide a localized completion/error summary. Test backup while SQLite WAL contains uncheckpointed writes and round-trip restoration across supported platforms.
 
+### 4.12 Google Books metadata lookup
+
+**Requirement META-001:** User-initiated Google Books lookup with field-by-field approval and no silent catalog changes.
+
+1. Provide a **Look up metadata** action for an existing book. Use the Google Books API at `https://www.googleapis.com/books/v1/volumes`; do not scrape Google Search result pages. The first release must work without requiring the librarian to configure an API key, subject to Google's unauthenticated quota and availability.
+2. Build the lookup query from the book's current fields. Prefer a nonblank ISBN; otherwise use the current title and authors, and include other current identifiers only when supported by the API. Show the exact current fields that will be sent before the user starts the request. Do not send notes, copy identifiers or locations, patron data, loan data, or local file paths.
+3. Return at most 10 candidates and show enough identifying information to choose one: title, authors, publisher, publication date, ISBN/industry identifiers, language, and page count. Never select a candidate and save it automatically. If there is no unambiguous result, require the librarian to choose a candidate or cancel.
+4. Map only supported catalog metadata into proposals: title, authors, ISBN, publisher, publication year, genre from the first category, tags from categories, identifiers from industry identifiers other than the selected ISBN, content language, and page count. Do not propose DDC, LCC, notes, copy data, cover images, or circulation data from this lookup. Preserve returned identifiers as strings and apply the same catalog validation and normalization rules as manual edits.
+5. Compare the selected candidate with the current book and display old and proposed values side by side. Let the librarian approve or reject each changed field independently; list-valued fields such as authors, tags, and identifiers are approved as complete fields. Default every proposed change to unapproved. Fields absent from the response are not proposals and must never clear existing values.
+6. Require final confirmation after field selection. Save all approved changes to the book in one database transaction, update `updated_at`, and preserve all rejected or unproposed fields. If no field is approved, perform no write. A validation, network, parsing, or database failure must leave the book unchanged.
+7. Run lookup and response parsing off the UI event loop. Limit the request to 15 seconds, limit the response body to 5 MiB, support cancellation before saving, and show localized progress, quota/rate-limit, offline, timeout, malformed-response, no-result, validation, and commit errors. Do not retry automatically in a way that could create duplicate writes.
+8. Connect only through HTTPS to the fixed Google Books API origin. Revalidate redirects using the public-address protections in COVER-001, reject redirects to another origin, and do not expose general-purpose network requests to the frontend. Treat API response text as untrusted data and render it without HTML interpretation.
+9. Do not persist lookup responses or queries after the review dialog closes, except for metadata fields the user explicitly approves and saves. Do not log complete queries or responses. Explain that lookup sends selected current book metadata to Google and is subject to Google's privacy policy and service availability.
+
+### 4.13 Authors catalog
+
+**Requirement AUTHORS-001:** Main-menu Authors view with books ordered by every listed author.
+
+1. Add **Authors** to the main navigation immediately after **Books** and before **Patrons** in English, Spanish, and French.
+2. Display a flat paginated list of author-book rows ordered by normalized author name ascending, then normalized book title ascending, then stable author text and book ID tie-breakers. Use the same Unicode normalization, case folding, accent handling, and missing-value ordering rules as SEARCH-001.
+3. Create one row for every author listed on a book. A book with multiple authors therefore appears once under each author. Suppress duplicate author names within the same book after canonical case-insensitive comparison while preserving the first entered display spelling. Show a book with no authors once under a localized **Unknown author** label, sorted after named authors.
+4. Each row shows the author, book title, cover thumbnail or placeholder, ISBN when present, total and available copy counts, and access to the same book details/actions available from Books. Do not create separate author domain documents; author names remain values in each book JSON document.
+5. Provide literal, Unicode/accent-insensitive search across author names and book titles. Paginate at 50 rows by default with 25/50/100 choices and visible total row count. Reset to page one when the search or page size changes. The list may contain more rows than books because multi-author books appear more than once.
+6. Refresh Authors after book creation, editing, deletion, CSV import, or approved Google metadata changes. Editing an author's spelling or a book's author list must immediately change the derived rows without a separate migration or synchronization step.
+
 ## 5. Data model and JSON document storage
 
 **Requirement DATA-001:** Versioned JSON domain records, transactional integrity, and backward-compatible migrations.
@@ -240,7 +267,8 @@ Tests are part of the application deliverable, not an optional follow-up. Every 
 - **Rust unit tests:** Cover book and classification validation, copy status transitions, patron eligibility, checkout/return rules, overdue date boundaries, and CSV parsing and duplicate detection.
 - **SQLite integration tests:** Use real temporary SQLite databases to verify JSON document persistence after reopening, uniqueness and reference integrity, migrations and older-document compatibility, and full transaction rollback on failed operations.
 - **Cover image tests:** Cover valid JPEG/PNG files, clipboard image bytes, HTTP and HTTPS retrieval, redirects, blocked private/non-public addresses, DNS rebinding defenses, credentials and unsupported schemes, timeouts, streaming size limits, unsupported or corrupt images, dimension/allocation limits, path restrictions, title-based filenames and renames, replacement/removal, cancellation, and cleanup failures without loss of the current cover. Use controlled local HTTP fixtures and mocked DNS/network boundaries; tests must not contact external services.
-- **Frontend tests:** Verify forms, navigation, loading and error states, destructive-action confirmation, catalog and patron search, classification fields, Books list/grid switching and application-level persistence, state preservation while switching modes, and import preview/confirmation/cancellation. Cover all three interface languages, translation-key completeness, and localized dates and errors.
+- **Frontend tests:** Verify forms, navigation, loading and error states, destructive-action confirmation, catalog and patron search, classification fields, Books list/grid switching and application-level persistence, Authors navigation/order/search/multi-author rows, Google candidate review and field-by-field approval, state preservation while switching modes, and import preview/confirmation/cancellation. Cover all three interface languages, translation-key completeness, and localized dates and errors.
+- **Google metadata tests:** Use local fixtures and mocked HTTP/DNS boundaries; never depend on the live Google service in automated tests. Cover ISBN and title/author queries from current fields, candidate selection, field mapping, missing fields, untrusted text rendering, per-field approval defaults, partial approval, no-op approval, validation and transaction rollback, cancellation, timeouts, size limits, quota/offline/malformed responses, redirect/origin restrictions, and preservation of rejected fields.
 - **CSV workflow tests:** Exercise both comma and pipe delimiters, BOM and Unicode, quoting and multiline fields, headers, invalid values, unknown-column acknowledgement, duplicate confirmation, cancellation, and atomic import failures.
 - **End-to-end tests:** Exercise the desktop UI through the real Tauri command layer and Rust backend, using isolated test data: create/search/edit a book, manage classifications and a cover, add a copy and patron, check out and return a book, and preview/import CSV records. Mocked browser tests may supplement these tests but do not replace real desktop integration testing.
 - **Startup smoke test:** Launch the application and verify that its window and catalog load without a panic, plugin initialization failure, missing capability, or frontend startup error. Compilation alone is not sufficient.
@@ -298,7 +326,7 @@ Linux support in the first release is limited to the named distribution baseline
 
 ## 7. Out of scope for the first release
 
-- Network access other than explicit public HTTP(S) cover-image retrieval, mobile app, multi-user permissions, and synchronization.
+- Network access other than explicit public HTTP(S) cover-image retrieval and user-initiated Google Books API metadata lookup, mobile app, multi-user permissions, and synchronization.
 - Reservations, renewals, fines, notifications, and acquisition/inventory accounting.
 - CSV export, non-CSV catalog import formats, and CSV import of copies, patrons, loans, or cover images. Whole-library backup archive restoration is in scope and is not a catalog import.
 - Multiple library branches and multiple copies of the same barcode.
@@ -328,6 +356,8 @@ The first release is acceptable when:
 19. Shelf locations, Unicode/accent-insensitive search, sorting, filters, and pagination behave as specified. Comma/pipe selection, ambiguity handling, limits, progress, and cancellation are verified.
 20. Accessibility checks, the supported-platform test matrix, and the performance measurements in sections 6.2–6.4 meet their requirements, with recorded evidence rather than build-only or mocked-browser claims.
 21. A librarian can switch the Books catalog between List and Grid modes without changing the current query, filters, sort, page, or page size. List is the default for a new or older application profile, the selected mode persists across restarts and library changes, and both modes expose equivalent catalog records, availability, cover state, and book actions.
+22. A librarian can request Google Books metadata for an existing book using its current fields, choose a candidate, review old and proposed values, approve individual fields, and commit only those approved changes. Missing, rejected, invalid, cancelled, or failed proposals leave existing metadata unchanged, and automated tests use mocked network fixtures rather than the live service.
+23. The main menu places Authors immediately after Books. Authors displays a searchable, stably ordered and paginated flat list with each multi-author book shown under every listed author, authorless books shown under a localized Unknown author label, and each row linked to the normal book details/actions.
 
 ## 9. Requirement traceability and release evidence
 
@@ -341,13 +371,15 @@ This is a verification map, not an implementation-status report:
 | CIRC-001 | Checkout, return, active/completed/lost loans, withdrawal | 1, 4–7, 17 | State-transition, date-boundary, rollback, real desktop tests |
 | PAT-001 | Patron lifecycle and history | 1, 4, 7 | Domain, persistence, frontend, real desktop tests |
 | I18N-001 | English, Spanish, French | 9 | Translation completeness, localized dates/errors, UI tests |
-| UI-001 | Navigation, forms, confirmations, outcomes, catalog display modes | 1, 4, 8, 9, 21 | Frontend and real desktop workflows |
+| UI-001 | Navigation, forms, confirmations, outcomes, catalog display modes | 1, 4, 8, 9, 21–23 | Frontend and real desktop workflows |
 | COVER-001 | Cover selection, validation, storage, cleanup | 8, 18 | Image fixtures, failure injection, crash recovery |
 | CSV-001 | Both delimiters, preview, duplicate control, atomic writes | 12–15, 19 | Parser, UI, limits/cancel, rollback and real desktop tests |
-| SEARCH-001 | Unicode search, ordering, filters, pagination | 3, 15, 19 | Unicode fixtures, stable page-boundary tests, UI tests |
+| SEARCH-001 | Unicode search, ordering, filters, pagination | 3, 15, 19, 23 | Unicode fixtures, stable page-boundary tests, UI tests |
 | STORE-001 | Portable libraries and persisted application preferences | 2, 18, 21 | Move/reopen, switch/cancel, preference persistence, missing/locked library tests |
 | BACKUP-001 | Consistent backup and validated restoration | 18 | Live-WAL snapshot, round trip, archive validation, failure tests |
-| DATA-001 | JSON integrity, references, versioning, transactions | 2, 4–6, 10, 11, 18 | Real SQLite, old fixtures, migration and rollback tests |
+| META-001 | Google Books lookup, candidate review, per-field approval | 22 | Mocked API/DNS fixtures, mapping, approval, cancellation, rollback, privacy tests |
+| AUTHORS-001 | Authors navigation and derived author-book ordering | 23 | Unicode ordering, multi-author/authorless fixtures, pagination, frontend and real desktop tests |
+| DATA-001 | JSON integrity, references, versioning, transactions | 2, 4–6, 10, 11, 18, 22 | Real SQLite, old fixtures, migration and rollback tests |
 | TEST-001 | Required test suites and regression coverage | 10, 14, 16 | Suite results, reproducible commands, platform evidence |
 | A11Y-001 | Accessible desktop interactions | 20 | Automated checks plus keyboard and screen-reader runs |
 | PLATFORM-001 | Supported OS/architecture and installable releases | 16, 20 | Install, real startup/workflow, package/signature checks |
