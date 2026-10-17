@@ -44,6 +44,12 @@ function errorMessage(error) {
   const known = {
     COMMITTED_CLEANUP_PENDING: "committed",
     INVALID_IMAGE: "coverHint", INVALID_IMAGE_SIZE: "coverHint",
+    CLIPBOARD_UNAVAILABLE: "clipboardCoverError", CLIPBOARD_IMAGE_MISSING: "clipboardCoverError",
+    COVER_URL_INVALID: "coverUrlError", COVER_URL_CREDENTIALS: "coverUrlError",
+    COVER_URL_SCHEME: "coverUrlError", COVER_URL_BLOCKED: "coverUrlError",
+    COVER_URL_DNS: "coverUrlError", COVER_URL_DOWNLOAD: "coverUrlError",
+    COVER_URL_TIMEOUT: "coverUrlError", COVER_URL_REDIRECTS: "coverUrlError",
+    COVER_URL_STATUS: "coverUrlError",
     COVER_MISSING: "invalidCoverAsset", COVER_INVALID: "invalidCoverAsset",
     NO_LIBRARY: "welcome", LIBRARY_NOT_FOUND: "missingLibrary",
     LIBRARY_LOCKED: "libraryLocked", SQLITE_BUSY: "databaseBusy",
@@ -351,6 +357,33 @@ async function bookForm(book = {}) {
   }));
 }
 
+async function coverSource(book, closeParent) {
+  const { dialog, close } = await modal(t("changeCover"), `<p>${t("coverHint")}</p>
+    <div class="header-actions">${button(t("coverFromFile"), "data-cover-file")}${button(t("coverFromClipboard"), "data-cover-clipboard")}</div>
+    <div>${field("coverUrl", "", 'type="url" placeholder="https://example.com/cover.jpg"')}</div>
+    ${button(t("coverFromUrl"), "data-cover-url", "primary")}`);
+  const complete = async (command, args = {}) => {
+    const result = await runOperation((operationId) => invoke(command, { bookId: book.id, operationId, ...args }));
+    if (!result) return;
+    await close(true);
+    await closeParent(true);
+    await loadPage();
+  };
+  dialog.querySelector("[data-cover-file]").onclick = () => act(async () => {
+    const path = await open({ multiple: false, filters: [{ name: "JPEG / PNG", extensions: ["jpg", "jpeg", "png"] }] });
+    if (path) await complete("set_cover", { sourcePath: path });
+  });
+  dialog.querySelector("[data-cover-clipboard]").onclick = () => act(() => complete("set_cover_from_clipboard"));
+  dialog.querySelector("[data-cover-url]").onclick = () => act(async () => {
+    const input = dialog.querySelector('[name="coverUrl"]');
+    if (!input.checkValidity() || !input.value.trim()) {
+      input.setAttribute("aria-invalid", "true");
+      throw new Error(`COVER_URL_INVALID: ${t("coverUrlError")}`);
+    }
+    await complete("set_cover_from_url", { url: input.value.trim() });
+  });
+}
+
 async function bookDetail(book) {
   const { dialog, close } = await modal(book.title, `<div class="book-detail">
     <div class="detail-cover">${book.coverImage ? `<img data-cover="${escape(book.id)}" alt="${escape(book.title)}">` : `<span class="cover-placeholder">${t("noCover")}</span>`}</div>
@@ -363,12 +396,7 @@ async function bookDetail(book) {
     <p>${t("coverHint")}</p><div class="header-actions">${button(t("edit"), "data-edit")}${button(t("changeCover"), "data-cover-pick")}${book.coverImage ? button(t("removeCover"), "data-cover-remove") : ""}${button(t("deleteBook"), "data-delete")}</div></div></div>
     <h3>${t("copies")}</h3><div id="copy-results"></div>${button(t("addCopy"), "data-add-copy")}`);
   dialog.querySelector("[data-edit]").onclick = () => act(async () => { await close(true); await bookForm(book); });
-  dialog.querySelector("[data-cover-pick]").onclick = () => act(async () => {
-    const path = await open({ multiple: false, filters: [{ name: "JPEG / PNG", extensions: ["jpg", "jpeg", "png"] }] });
-    if (!path) return;
-    await runOperation((operationId) => invoke("set_cover", { bookId: book.id, sourcePath: path, operationId }));
-    await close(true); await loadPage();
-  });
+  dialog.querySelector("[data-cover-pick]").onclick = () => act(() => coverSource(book, close));
   dialog.querySelector("[data-cover-remove]")?.addEventListener("click", () => act(async () => {
     if (!await confirmAction(t("removeCover"))) return;
     await invoke("remove_cover", { bookId: book.id }); await close(true); await loadPage();

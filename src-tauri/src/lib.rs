@@ -1,9 +1,11 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Cursor,
+    io::{Cursor, Read},
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -25,6 +27,9 @@ const MAX_LOAN_PERIOD_DAYS: u32 = 3650;
 const MAX_COVER_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_CSV_BYTES: usize = 20 * 1024 * 1024;
 const MAX_PAGE_SIZE: usize = 100;
+const MAX_COVER_REDIRECTS: usize = 5;
+const COVER_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_COVER_TITLE_BYTES: usize = 180;
 
 struct AppState {
     connection: Mutex<Connection>,
@@ -374,6 +379,95 @@ pub(crate) fn validate_cover_image(bytes: &[u8]) -> Result<(&'static str, &'stat
         .decode()
         .map_err(|_| "INVALID_IMAGE: The selected image is corrupt or unreadable.".to_owned())?;
     Ok((extension, media_type))
+}
+
+fn sanitized_cover_title(title: &str) -> String {
+    let mut value = String::new();
+    let mut last_replacement = false;
+    let mut last_whitespace = false;
+    for character in title.trim().chars() {
+        if character.is_control()
+            || matches!(
+                character,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+            )
+        {
+            if !last_replacement {
+                value.push('_');
+            }
+            last_replacement = true;
+            last_whitespace = false;
+        } else if character.is_whitespace() {
+            if !last_whitespace && !value.is_empty() {
+                value.push(' ');
+            }
+            last_replacement = false;
+            last_whitespace = true;
+        } else {
+            value.push(character);
+            last_replacement = false;
+            last_whitespace = false;
+        }
+    }
+    while value.ends_with([' ', '.']) {
+        value.pop();
+    }
+    while value.len() > MAX_COVER_TITLE_BYTES {
+        value.pop();
+    }
+    while value.ends_with([' ', '.']) {
+        value.pop();
+    }
+    if value.is_empty() || value.chars().all(|character| character == '_') {
+        value.clear();
+        value.push_str("book");
+    }
+    let stem = value.split('.').next().unwrap_or_default();
+    if matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        value.insert(0, '_');
+    }
+    value
+}
+
+fn cover_relative_path(title: &str, book_id: &str, extension: &str) -> String {
+    format!(
+        "covers/{}--{}.{}",
+        sanitized_cover_title(title),
+        book_id,
+        extension
+    )
+}
+
+fn cover_extension(cover: &CoverImage) -> Result<&'static str, String> {
+    match cover.media_type.as_str() {
+        "image/jpeg" => Ok("jpg"),
+        "image/png" => Ok("png"),
+        _ => Err("INVALID_IMAGE: Stored cover has an unsupported media type.".into()),
+    }
 }
 
 fn now_string() -> String {
@@ -1203,9 +1297,13 @@ fn save_book(
     ensure_library_open(&state)?;
     let title = title.trim().to_owned();
     validate_book_fields(&title, publication_year, pages)?;
+    let library_dir = current_library_dir(&state)?;
     let connection = state.connection.lock().map_err(app_error)?;
     let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let previous: Option<Book> = read_document(&connection, "books", &id)?;
+    let previous_cover = previous
+        .as_ref()
+        .and_then(|value| value.cover_image.clone());
     let extra = previous
         .as_ref()
         .map(|book| book.extra.clone())
@@ -1231,18 +1329,57 @@ fn save_book(
         language: clean_optional(language),
         pages,
         notes: clean_optional(notes),
-        cover_image: previous
-            .as_ref()
-            .and_then(|value| value.cover_image.clone()),
+        cover_image: previous_cover.clone(),
         created_at: previous
             .map(|value| value.created_at)
             .unwrap_or_else(|| now.clone()),
         updated_at: now,
         extra,
     };
+    let mut book = book;
+    let renamed_cover = if let Some(cover) = previous_cover.as_ref() {
+        let relative = cover_relative_path(&book.title, &id, cover_extension(cover)?);
+        if relative != cover.path {
+            let source = managed_cover_path(&library_dir, &cover.path)?;
+            let destination = managed_cover_path(&library_dir, &relative)?;
+            let mut input = fs::File::open(source).map_err(app_error)?;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)
+                .map_err(app_error)?;
+            if let Err(error) = std::io::copy(&mut input, &mut output) {
+                let _ = fs::remove_file(&destination);
+                return Err(app_error(error));
+            }
+            if let Err(error) = output.sync_all() {
+                let _ = fs::remove_file(&destination);
+                return Err(app_error(error));
+            }
+            book.cover_image = Some(CoverImage {
+                path: relative.clone(),
+                media_type: cover.media_type.clone(),
+            });
+            Some((cover.path.clone(), relative))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let tx = connection.unchecked_transaction().map_err(app_error)?;
-    save_document(&tx, "books", &id, &book)?;
-    tx.commit().map_err(app_error)?;
+    let commit_result =
+        save_document(&tx, "books", &id, &book).and_then(|()| tx.commit().map_err(app_error));
+    if let Err(error) = commit_result {
+        if let Some((_, staged)) = renamed_cover.as_ref() {
+            let _ = remove_managed_cover(&library_dir, staged);
+        }
+        return Err(error);
+    }
+    drop(connection);
+    if let Some((previous_path, _)) = renamed_cover {
+        cleanup_cover_if_unreferenced(&state, &library_dir, &previous_path)?;
+    }
     Ok(book)
 }
 
@@ -2159,7 +2296,12 @@ fn reconcile_owned_covers(connection: &Connection, library_dir: &Path) -> Result
         let extension = path.extension().and_then(|extension| extension.to_str());
         let stem = path.file_stem().and_then(|stem| stem.to_str());
         if !matches!(extension, Some("jpg" | "png"))
-            || !stem.is_some_and(|stem| Uuid::parse_str(stem).is_ok())
+            || !stem.is_some_and(|stem| {
+                Uuid::parse_str(stem).is_ok()
+                    || stem
+                        .rsplit_once("--")
+                        .is_some_and(|(_, id)| Uuid::parse_str(id).is_ok())
+            })
         {
             continue;
         }
@@ -2193,123 +2335,324 @@ fn set_cover_internal(
     operation_id: Option<String>,
 ) -> Result<Book, String> {
     ensure_library_open(state)?;
-    let library_dir = current_library_dir(state)?;
-    if let Some(operation_id) = operation_id.as_deref() {
-        state.operation_status.lock().map_err(app_error)?.insert(
-            operation_id.into(),
-            OperationStatus {
-                phase: "validating".into(),
-                completed: 0,
-                total: 1,
-                cancellable: true,
-            },
-        );
-    }
     let source = PathBuf::from(source_path);
     let metadata = fs::metadata(&source).map_err(app_error)?;
     if !metadata.is_file() || metadata.len() > MAX_COVER_BYTES {
         return Err("INVALID_IMAGE_SIZE: Select a JPEG or PNG file smaller than 10 MB.".into());
     }
     let bytes = fs::read(&source).map_err(app_error)?;
-    let (extension, media_type) = validate_cover_image(&bytes)?;
-    if let Some(operation_id) = operation_id.as_deref() {
-        let cancelled = state
-            .cancelled_operations
-            .lock()
-            .map_err(app_error)?
-            .contains(operation_id);
-        if cancelled {
-            return Err(
-                "OPERATION_CANCELLED: Cover replacement was cancelled before saving.".into(),
-            );
-        }
+    install_cover_bytes(state, book_id, bytes, operation_id)
+}
+
+fn update_cover_operation(
+    state: &AppState,
+    operation_id: Option<&str>,
+    phase: &str,
+    completed: usize,
+    total: usize,
+    cancellable: bool,
+) -> Result<(), String> {
+    if let Some(operation_id) = operation_id {
         state.operation_status.lock().map_err(app_error)?.insert(
-            operation_id.into(),
+            operation_id.to_owned(),
             OperationStatus {
-                phase: "saving".into(),
-                completed: 0,
-                total: 1,
-                cancellable: true,
+                phase: phase.to_owned(),
+                completed,
+                total,
+                cancellable,
             },
         );
     }
-    let relative_path = format!("covers/{}.{}", Uuid::new_v4(), extension);
+    Ok(())
+}
+
+fn cover_operation_cancelled(state: &AppState, operation_id: Option<&str>) -> Result<(), String> {
+    if operation_id.is_some_and(|id| {
+        state
+            .cancelled_operations
+            .lock()
+            .map(|cancelled| cancelled.contains(id))
+            .unwrap_or(false)
+    }) {
+        Err("OPERATION_CANCELLED: Cover replacement was cancelled before saving.".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn install_cover_bytes(
+    state: &AppState,
+    book_id: String,
+    bytes: Vec<u8>,
+    operation_id: Option<String>,
+) -> Result<Book, String> {
+    ensure_library_open(state)?;
+    update_cover_operation(state, operation_id.as_deref(), "validating", 0, 1, true)?;
+    let (extension, media_type) = validate_cover_image(&bytes)?;
+    cover_operation_cancelled(state, operation_id.as_deref())?;
+    update_cover_operation(state, operation_id.as_deref(), "saving", 0, 1, true)?;
+    let library_dir = current_library_dir(state)?;
+    let connection = state.connection.lock().map_err(app_error)?;
+    let current_book = get_book(&connection, &book_id)?;
+    let previous = current_book.cover_image.clone();
+    let relative_path = cover_relative_path(&current_book.title, &book_id, extension);
     let destination = managed_cover_path(&library_dir, &relative_path)?;
-    let parent = destination
-        .parent()
-        .ok_or_else(|| "INVALID_COVER_PATH: Cover path has no parent directory.".to_owned())?;
-    fs::create_dir_all(parent).map_err(app_error)?;
-    if let Err(error) = fs::write(&destination, bytes) {
-        let _ = fs::remove_file(&destination);
+    let replaces_same_path = previous
+        .as_ref()
+        .is_some_and(|cover| cover.path == relative_path);
+    let staged_path = if replaces_same_path {
+        library_dir
+            .join("covers")
+            .join(format!(".cover-{}.partial", Uuid::new_v4()))
+    } else {
+        destination.clone()
+    };
+    if let Err(error) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged_path)
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, &bytes)?;
+            file.sync_all()
+        })
+    {
+        let _ = fs::remove_file(&staged_path);
         return Err(app_error(error));
     }
 
-    let update_result = (|| {
-        let connection = state.connection.lock().map_err(app_error)?;
-        if operation_id.as_deref().is_some_and(|id| {
-            state
-                .cancelled_operations
-                .lock()
-                .map(|set| set.contains(id))
-                .unwrap_or(false)
-        }) {
-            return Err(
-                "OPERATION_CANCELLED: Cover replacement was cancelled before saving.".to_owned(),
-            );
+    if let Err(error) = cover_operation_cancelled(state, operation_id.as_deref()) {
+        let _ = fs::remove_file(&staged_path);
+        return Err(error);
+    }
+    let mut book = current_book;
+    book.cover_image = Some(CoverImage {
+        path: relative_path.clone(),
+        media_type: media_type.into(),
+    });
+    book.updated_at = now_string();
+    let tx = connection.unchecked_transaction().map_err(app_error)?;
+    if let Err(error) = save_document(&tx, "books", &book_id, &book) {
+        let _ = fs::remove_file(&staged_path);
+        return Err(error);
+    }
+    update_cover_operation(state, operation_id.as_deref(), "committing", 0, 1, false)?;
+    if let Err(error) = tx.commit().map_err(app_error) {
+        let _ = fs::remove_file(&staged_path);
+        return Err(error);
+    }
+    drop(connection);
+
+    if replaces_same_path {
+        let backup = library_dir
+            .join("covers")
+            .join(format!(".cover-{}.previous", Uuid::new_v4()));
+        if let Err(error) = fs::rename(&destination, &backup) {
+            let _ = fs::remove_file(&staged_path);
+            return Err(format!(
+                "COVER_COMMITTED_CLEANUP_FAILED: Cover metadata was committed, but the previous asset could not be staged: {error}"
+            ));
         }
-        let mut book = get_book(&connection, &book_id)?;
-        let previous = book.cover_image.clone();
-        book.cover_image = Some(CoverImage {
-            path: relative_path.clone(),
-            media_type: media_type.into(),
-        });
-        book.updated_at = now_string();
-        let tx = connection.unchecked_transaction().map_err(app_error)?;
-        save_document(&tx, "books", &book_id, &book)?;
-        if let Some(operation_id) = operation_id.as_deref() {
-            state.operation_status.lock().map_err(app_error)?.insert(
-                operation_id.into(),
-                OperationStatus {
-                    phase: "committing".into(),
-                    completed: 0,
-                    total: 1,
-                    cancellable: false,
-                },
-            );
+        if let Err(error) = fs::rename(&staged_path, &destination) {
+            let _ = fs::rename(&backup, &destination);
+            let _ = fs::remove_file(&staged_path);
+            return Err(format!(
+                "COVER_COMMITTED_CLEANUP_FAILED: Cover metadata was committed, but the managed asset could not be replaced: {error}"
+            ));
         }
-        tx.commit().map_err(app_error)?;
-        Ok((book, previous))
-    })();
-    match update_result {
-        Err(error) => match fs::remove_file(&destination) {
-            Ok(()) => Err(error),
-            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
-                Err(error)
-            }
-            Err(cleanup_error) => Err(format!(
-                "{error}; unused cover cleanup also failed: {cleanup_error}"
-            )),
-        },
-        Ok((book, previous)) => {
-            if let Some(old_cover) = previous {
-                if old_cover.path != relative_path {
-                    cleanup_cover_if_unreferenced(&state, &library_dir, &old_cover.path)?;
-                }
-            }
-            if let Some(operation_id) = operation_id {
-                state.operation_status.lock().map_err(app_error)?.insert(
-                    operation_id,
-                    OperationStatus {
-                        phase: "completed".into(),
-                        completed: 1,
-                        total: 1,
-                        cancellable: false,
-                    },
-                );
-            }
-            Ok(book)
+        fs::remove_file(&backup).map_err(|error| {
+            format!("COVER_COMMITTED_CLEANUP_FAILED: Cover was replaced, but the old asset cleanup failed: {error}")
+        })?;
+    }
+    if let Some(old_cover) = previous {
+        if old_cover.path != relative_path {
+            cleanup_cover_if_unreferenced(state, &library_dir, &old_cover.path)?;
         }
     }
+    update_cover_operation(state, operation_id.as_deref(), "completed", 1, 1, false)?;
+    Ok(book)
+}
+
+#[tauri::command(async)]
+fn set_cover_from_clipboard(
+    state: State<'_, AppState>,
+    book_id: String,
+    operation_id: Option<String>,
+) -> Result<Book, String> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|error| format!("CLIPBOARD_UNAVAILABLE: Cannot access the clipboard: {error}"))?;
+    let image = clipboard.get_image().map_err(|error| {
+        format!("CLIPBOARD_IMAGE_MISSING: Copy a JPEG or PNG image first: {error}")
+    })?;
+    if image.width > 8_000 || image.height > 8_000 {
+        return Err("INVALID_IMAGE: Clipboard image dimensions exceed 8,000 pixels.".into());
+    }
+    let expected = image
+        .width
+        .checked_mul(image.height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "INVALID_IMAGE: Clipboard image dimensions are invalid.".to_owned())?;
+    if expected != image.bytes.len() || expected > 128 * 1024 * 1024 {
+        return Err("INVALID_IMAGE: Clipboard image allocation exceeds 128 MiB.".into());
+    }
+    let rgba = image::RgbaImage::from_raw(
+        image.width as u32,
+        image.height as u32,
+        image.bytes.into_owned(),
+    )
+    .ok_or_else(|| "INVALID_IMAGE: Clipboard image bytes are invalid.".to_owned())?;
+    let mut encoded = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut encoded, ImageFormat::Png)
+        .map_err(app_error)?;
+    install_cover_bytes(&state, book_id, encoded.into_inner(), operation_id)
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !(a == 0
+                || a == 10
+                || a == 127
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 192 && b == 168)
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 224)
+        }
+        IpAddr::V6(ip) => {
+            if let Some(ip) = ip.to_ipv4_mapped() {
+                return is_public_ip(IpAddr::V4(ip));
+            }
+            let segments = ip.segments();
+            (segments[0] & 0xe000) == 0x2000 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
+}
+
+fn public_socket_for(url: &reqwest::Url) -> Result<(String, SocketAddr), String> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("COVER_URL_CREDENTIALS: Cover URLs cannot contain credentials.".into());
+    }
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("COVER_URL_SCHEME: Use an HTTP or HTTPS cover URL.".into());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "COVER_URL_INVALID: Cover URL requires a host.".to_owned())?
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "COVER_URL_INVALID: Cover URL has no usable port.".to_owned())?;
+    let addresses: Vec<SocketAddr> = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|error| format!("COVER_URL_DNS: Cannot resolve cover URL host: {error}"))?
+        .collect();
+    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
+        return Err("COVER_URL_BLOCKED: Cover URL must resolve only to public addresses.".into());
+    }
+    Ok((host, addresses[0]))
+}
+
+fn download_cover(
+    state: &AppState,
+    source_url: &str,
+    operation_id: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let started = Instant::now();
+    let mut url = reqwest::Url::parse(source_url)
+        .map_err(|error| format!("COVER_URL_INVALID: Enter a valid HTTP(S) URL: {error}"))?;
+    for redirect_count in 0..=MAX_COVER_REDIRECTS {
+        cover_operation_cancelled(state, operation_id)?;
+        let remaining = COVER_DOWNLOAD_TIMEOUT
+            .checked_sub(started.elapsed())
+            .ok_or_else(|| "COVER_URL_TIMEOUT: Cover download exceeded 30 seconds.".to_owned())?;
+        let (host, address) = public_socket_for(&url)?;
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(remaining)
+            .no_proxy()
+            .resolve(&host, address)
+            .build()
+            .map_err(app_error)?;
+        let mut response = client
+            .get(url.clone())
+            .send()
+            .map_err(|error| format!("COVER_URL_DOWNLOAD: Cover download failed: {error}"))?;
+        if response.status().is_redirection() {
+            if redirect_count == MAX_COVER_REDIRECTS {
+                return Err("COVER_URL_REDIRECTS: Cover URL exceeded five redirects.".into());
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| "COVER_URL_REDIRECTS: Redirect has no location.".to_owned())?
+                .to_str()
+                .map_err(|_| "COVER_URL_REDIRECTS: Redirect location is invalid.".to_owned())?;
+            url = url
+                .join(location)
+                .map_err(|error| format!("COVER_URL_REDIRECTS: Invalid redirect: {error}"))?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(format!(
+                "COVER_URL_STATUS: Cover server returned HTTP {}.",
+                response.status()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_COVER_BYTES)
+        {
+            return Err("INVALID_IMAGE_SIZE: Cover images cannot exceed 10 MiB.".into());
+        }
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            cover_operation_cancelled(state, operation_id)?;
+            if started.elapsed() >= COVER_DOWNLOAD_TIMEOUT {
+                return Err("COVER_URL_TIMEOUT: Cover download exceeded 30 seconds.".into());
+            }
+            let count = response
+                .read(&mut buffer)
+                .map_err(|error| format!("COVER_URL_DOWNLOAD: Cover download failed: {error}"))?;
+            if count == 0 {
+                return Ok(bytes);
+            }
+            if bytes.len() + count > MAX_COVER_BYTES as usize {
+                return Err("INVALID_IMAGE_SIZE: Cover images cannot exceed 10 MiB.".into());
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+            update_cover_operation(
+                state,
+                operation_id,
+                "downloading",
+                bytes.len(),
+                response.content_length().unwrap_or(0) as usize,
+                true,
+            )?;
+        }
+    }
+    Err("COVER_URL_REDIRECTS: Cover URL exceeded five redirects.".into())
+}
+
+#[tauri::command(async)]
+fn set_cover_from_url(
+    state: State<'_, AppState>,
+    book_id: String,
+    url: String,
+    operation_id: Option<String>,
+) -> Result<Book, String> {
+    ensure_library_open(&state)?;
+    update_cover_operation(&state, operation_id.as_deref(), "downloading", 0, 0, true)?;
+    let bytes = download_cover(&state, url.trim(), operation_id.as_deref())?;
+    install_cover_bytes(&state, book_id, bytes, operation_id)
 }
 
 #[tauri::command]
@@ -2526,6 +2869,10 @@ mod tests {
         let first = set_cover_internal(&state, book.id.clone(), source.display().to_string(), None)
             .unwrap();
         let first_path = first.cover_image.unwrap().path;
+        assert_eq!(
+            first_path,
+            format!("covers/{}--{}.png", book.title, book.id)
+        );
         let previous_bytes = fs::read(library.join(&first_path)).unwrap();
         let corrupt = root.join("corrupt.png");
         fs::write(&corrupt, b"not an image").unwrap();
@@ -2574,9 +2921,35 @@ mod tests {
             .unwrap();
         let replacement =
             set_cover_internal(&state, book.id, source.display().to_string(), None).unwrap();
-        assert_ne!(replacement.cover_image.unwrap().path, first_path);
-        assert!(!library.join(first_path).exists());
+        assert_eq!(replacement.cover_image.unwrap().path, first_path);
+        assert!(library.join(first_path).exists());
         assert_eq!(fs::read_dir(library.join("covers")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn cover_names_are_portable_unique_and_public_url_targets_are_required() {
+        assert_eq!(
+            cover_relative_path(" CON:  Rust / Guide. ", "book-id", "png"),
+            "covers/CON_ Rust _ Guide--book-id.png"
+        );
+        assert_eq!(sanitized_cover_title("CON"), "_CON");
+        assert_eq!(
+            cover_relative_path("***", "book-id", "jpg"),
+            "covers/book--book-id.jpg"
+        );
+        assert!(!is_public_ip("127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("10.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("169.254.1.1".parse().unwrap()));
+        assert!(!is_public_ip("2001:db8::1".parse().unwrap()));
+        assert!(is_public_ip("8.8.8.8".parse().unwrap()));
+        assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+
+        let blocked = reqwest::Url::parse("http://127.0.0.1/cover.png").unwrap();
+        assert!(public_socket_for(&blocked).is_err());
+        let credentials = reqwest::Url::parse("https://user:secret@example.com/cover.png").unwrap();
+        assert!(public_socket_for(&credentials).is_err());
+        let unsupported = reqwest::Url::parse("file:///tmp/cover.png").unwrap();
+        assert!(public_socket_for(&unsupported).is_err());
     }
 
     fn seed_lending_records(connection: &Connection) -> (Book, CopyRecord, Patron) {
@@ -3365,6 +3738,8 @@ pub fn run() {
             list_loans,
             query_loans,
             set_cover,
+            set_cover_from_clipboard,
+            set_cover_from_url,
             remove_cover,
             cover_data,
             csv_import::preview_book_csv,

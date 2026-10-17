@@ -102,7 +102,7 @@ The loan period is a positive whole number of calendar days from 1 through 3650.
 
 The Tauri desktop interface must provide screens or equivalent workflows for:
 
-- Browsing and searching books, viewing book details and cover images, and adding or editing books.
+- Browsing and searching books, viewing book details and cover images, adding or editing books, and creating a cover from a local file, clipboard image, or HTTP(S) image URL.
 - Importing book metadata from a local CSV file, previewing the records, and reviewing validation results before saving.
 - Adding and updating physical copies, viewing their status and shelf location, and recording loss, recovery, withdrawal, or loss resolution.
 - Registering, searching, editing, and deactivating patrons.
@@ -116,12 +116,16 @@ Display clear validation and operational errors. Confirm destructive actions bef
 
 **Requirement COVER-001:** Managed cover assets and safe image lifecycle.
 
-1. Use a native file picker to let the librarian select a local image for a book. Cover images are optional and associated with the book, not with individual physical copies.
+1. Let the librarian create or replace a cover from any of these sources: a local image selected with a native file picker, JPEG or PNG image bytes currently available on the system clipboard, or an explicitly entered `http://` or `https://` image URL. Clipboard support is image-only; do not interpret clipboard text as a URL. Cover images are optional and associated with the book, not with individual physical copies.
 2. Support common image formats (at minimum JPEG and PNG); validate file type and readability before accepting an image. Reject unsupported or corrupt files with a localized, actionable error.
 3. Copy accepted images into an application-managed cover-image directory. Keep image bytes as files rather than embedding base64 data in JSON documents or SQLite. Store the managed relative asset path and image metadata in the book JSON document.
 4. Display cover images in book search results and book details, with a localized or neutral placeholder when no image is set or an image cannot be displayed.
 5. Replacing or removing a cover must not leave orphaned managed image files. Do not delete the current managed image until the book document update succeeds. If saving the new image or updating its document fails, preserve the current cover and clean up any newly created unused image.
-6. Restrict image access to application-managed assets. Do not load arbitrary remote URLs or expose unrestricted filesystem access to the frontend.
+6. Restrict displayed image access to application-managed assets and do not expose unrestricted filesystem access to the frontend. Fetch URL sources in the Rust backend, validate them, copy accepted bytes into managed storage, and display only the resulting managed asset. Never store or load the remote URL as the book's displayed cover reference.
+7. Name each managed cover file from the book title using the format `<sanitized-title>--<book-id>.<extension>`, preserving the validated image format's `jpg` or `png` extension. The book ID suffix prevents collisions between books with the same title. Sanitize the title for macOS, Windows, and Linux by trimming surrounding whitespace; replacing path separators, control characters, and characters forbidden by any supported platform with `_`; collapsing repeated replacement characters and whitespace; removing trailing spaces and periods; and prefixing Windows-reserved device names with `_`. Limit the title portion as needed to remain within supported filesystem filename limits without removing or truncating the book ID or extension. Use `book` when sanitization leaves no title characters.
+8. When a book title changes and the book has a cover, rename the managed cover to match the new sanitized title. Commit the title and new relative cover path together. Do not remove the old cover path until the database update commits; if the rename or database update fails, preserve the previous title, cover reference, and cover file. On successful commit, remove the obsolete managed file using the same safe cleanup rules as cover replacement.
+9. For URL sources, allow only `http` and `https`; reject embedded credentials and all other schemes. Resolve the host before connecting and permit only publicly routable addresses. Block loopback, private, link-local, multicast, unspecified, documentation, carrier-grade NAT, and other non-public address ranges for both IPv4 and IPv6. Re-resolve and revalidate every redirect target, reject redirects to a blocked address or unsupported scheme, and limit downloads to five redirects and 30 seconds.
+10. Enforce the same encoded-size, dimensions, decoded-allocation, format, and corruption checks for file, clipboard, and URL sources. For URL downloads, reject an oversized `Content-Length` before reading and enforce the encoded-size limit while streaming even when the length is absent or incorrect. Treat response headers as hints only; validate the downloaded bytes before installing the cover. Do not retain partial downloads after cancellation or failure.
 
 ### 4.8 CSV book import
 
@@ -210,6 +214,8 @@ Store book `tags` and `identifiers` as arrays of strings. Trim surrounding white
 
 Store cover image files in the library's managed `covers/` directory alongside, but not inside, the SQLite database; the book's JSON document stores only the relative path and metadata. Include cover assets in built-in backup and restore. Removing a book or cover must clean up its managed asset safely without deleting files outside the selected library's managed directory.
 
+Managed cover paths use `covers/<sanitized-title>--<book-id>.<extension>` as defined in COVER-001. Title edits must update the book title and managed relative cover path atomically while preserving the prior committed file and reference on failure. Existing cover files created under an older naming scheme remain readable; rename them to the title-based format the next time the associated title or cover is changed.
+
 ## 6. Non-functional requirements
 
 - Implement the application in stable Rust.
@@ -218,7 +224,7 @@ Store cover image files in the library's managed `covers/` directory alongside, 
 - Use transactions for multi-document operations and parameterized SQL for all user-supplied values.
 - Never silently replace or delete an existing database. Database initialization and migration failures must be reported clearly.
 - Keep database access and business rules independent of Tauri command handlers and frontend presentation.
-- Expose only the operations needed by the frontend through Tauri commands, validate all command inputs in the Rust backend, and scope filesystem access to the selected library, application settings, and user-selected image, CSV, and backup/restore paths. Do not expose unrestricted file access or load remote code in the webview.
+- Expose only the operations needed by the frontend through Tauri commands, validate all command inputs in the Rust backend, and scope filesystem access to the selected library, application settings, and user-selected image, CSV, and backup/restore paths. Restrict cover-image network access to the validated public HTTP(S) retrieval defined in COVER-001. Do not expose unrestricted file or network access or load remote code in the webview.
 - Handle empty databases, missing records, duplicate identifiers, malformed dates, and database I/O errors without panics.
 - Ship and test complete English, Spanish, and French desktop-interface translations.
 - Provide automated tests for domain rules and database persistence. Tests must use temporary databases and must not modify a user's real library data.
@@ -232,7 +238,7 @@ Tests are part of the application deliverable, not an optional follow-up. Every 
 
 - **Rust unit tests:** Cover book and classification validation, copy status transitions, patron eligibility, checkout/return rules, overdue date boundaries, and CSV parsing and duplicate detection.
 - **SQLite integration tests:** Use real temporary SQLite databases to verify JSON document persistence after reopening, uniqueness and reference integrity, migrations and older-document compatibility, and full transaction rollback on failed operations.
-- **Cover image tests:** Cover valid JPEG/PNG files, unsupported or corrupt images, size limits, path restrictions, replacement/removal, and cleanup failures without loss of the current cover.
+- **Cover image tests:** Cover valid JPEG/PNG files, clipboard image bytes, HTTP and HTTPS retrieval, redirects, blocked private/non-public addresses, DNS rebinding defenses, credentials and unsupported schemes, timeouts, streaming size limits, unsupported or corrupt images, dimension/allocation limits, path restrictions, title-based filenames and renames, replacement/removal, cancellation, and cleanup failures without loss of the current cover. Use controlled local HTTP fixtures and mocked DNS/network boundaries; tests must not contact external services.
 - **Frontend tests:** Verify forms, navigation, loading and error states, destructive-action confirmation, catalog and patron search, classification fields, and import preview/confirmation/cancellation. Cover all three interface languages, translation-key completeness, and localized dates and errors.
 - **CSV workflow tests:** Exercise both comma and pipe delimiters, BOM and Unicode, quoting and multiline fields, headers, invalid values, unknown-column acknowledgement, duplicate confirmation, cancellation, and atomic import failures.
 - **End-to-end tests:** Exercise the desktop UI through the real Tauri command layer and Rust backend, using isolated test data: create/search/edit a book, manage classifications and a cover, add a copy and patron, check out and return a book, and preview/import CSV records. Mocked browser tests may supplement these tests but do not replace real desktop integration testing.
@@ -272,8 +278,8 @@ Linux support in the first release is limited to the named distribution baseline
 - From process launch to an interactive first catalog page (catalog results rendered and keyboard interaction available): at most 3 seconds at the 95th percentile over 20 warm launches. Calculate percentiles using the nearest-rank method (`rank = ceiling(p × sample_count)`). Record a separate first launch after reboot; exclude installation and migrations from this threshold and report them separately.
 - From submitting a search/filter/page change to all 50 results being rendered and available for interaction: at most 500 ms at the 95th percentile over 100 operations on the fixture, using the same nearest-rank method.
 - Parse and preview a valid 10,000-record CSV within 10 seconds and commit it within 15 seconds on the reference hardware, including duplicate checks against the fixture. Record five runs for each delimiter; every measured run must meet the bound.
-- Keep scrolling and cancellation usable during image processing, import, backup, and restore; run blocking work off the UI event loop. Show progress for operations taking more than 1 second.
-- Cover imports accept JPEG/PNG files up to 10 MiB, dimensions up to 8,000 pixels per side, and decoded image allocations up to 128 MiB. Validate before installing the new asset; explain rejected limits in the selected language.
+- Keep scrolling and cancellation usable during clipboard processing, URL download, image validation, import, backup, and restore; run blocking work off the UI event loop. Show progress for operations taking more than 1 second.
+- Cover creation from files, clipboard images, or URLs accepts JPEG/PNG content up to 10 MiB encoded, dimensions up to 8,000 pixels per side, and decoded image allocations up to 128 MiB. Validate before installing the new asset; explain rejected limits in the selected language.
 - Bound preview rendering and load list images lazily. Do not load or transfer the entire library and all cover bytes just to display one page.
 
 ### 6.5 Failures, recovery, and privacy
@@ -287,11 +293,11 @@ Linux support in the first release is limited to the named distribution baseline
 - For permission errors and full disks, preserve the last committed state and show the failed operation, an actionable localized explanation, and optional technical details. Distinguish a failed database commit from a committed update whose asset cleanup or UI refresh failed.
 - Stage new cover assets before updating references. Keep the old asset until commit; after commit, queue old assets for cleanup. On restart reconcile interrupted operations, removing only unreferenced files proven to be application-owned. Never delete the cover referenced by committed data because later cleanup failed.
 - Archive extraction and cover reads/writes must reject traversal and symlink escapes from managed storage. Deletion cleanup must target only known owned assets.
-- Keep diagnostic logs local, redact patron/contact data and book notes, and never log complete imported files. Do not upload telemetry or library data. Explain that libraries and backup archives are not encrypted by the app and rely on operating-system access controls.
+- Keep diagnostic logs local, redact patron/contact data and book notes, and never log complete imported files, clipboard image bytes, downloaded image bytes, or URL credentials. Do not upload telemetry or library data. Explain that retrieving a cover URL sends a network request to that server and may disclose the user's IP address and request metadata. Libraries and backup archives are not encrypted by the app and rely on operating-system access controls.
 
 ## 7. Out of scope for the first release
 
-- Network access, mobile app, multi-user permissions, and synchronization.
+- Network access other than explicit public HTTP(S) cover-image retrieval, mobile app, multi-user permissions, and synchronization.
 - Reservations, renewals, fines, notifications, and acquisition/inventory accounting.
 - CSV export, non-CSV catalog import formats, and CSV import of copies, patrons, loans, or cover images. Whole-library backup archive restoration is in scope and is not a catalog import.
 - Multiple library branches and multiple copies of the same barcode.
@@ -307,7 +313,7 @@ The first release is acceptable when:
 5. A checked-out copy cannot be checked out again, and an active loan cannot be duplicated for that copy.
 6. Returning a loan records its return date and makes the copy available.
 7. Active and overdue loan listings correctly reflect persisted loan data.
-8. A librarian can select, display, replace, and remove a valid cover image. Invalid images are rejected, and replacing/removing a cover does not leave orphaned files or lose the current cover on failure.
+8. A librarian can create a cover from a selected local file, clipboard JPEG/PNG image, or public HTTP(S) image URL, then display, replace, and remove it. Private or unsafe URL targets and invalid images are rejected. Covers use the required title-based managed filename, and title changes rename them without leaving orphaned files or losing the current cover on failure.
 9. The interface provides English, Spanish, and French labels, messages, validation errors, and operational errors; selecting each language produces the corresponding localized output.
 10. Automated tests cover JSON document persistence and validation, the checkout/return lifecycle, overdue calculation, uniqueness constraints, cover image management, localization, and transaction rollback on failed operations.
 11. A new database is initialized safely, and an existing database is migrated without losing its documents.

@@ -58,9 +58,9 @@ Libraries and backups are **not encrypted** by the application. Protect them usi
 
 ### Covers and recovery
 
-Book details allow adding, replacing or removing JPEG/PNG covers. Limits: 10 MiB encoded, 8,000 pixels per side, 128 MiB decoded. Images load lazily. A missing cover shows a repair message; replace/remove it without deleting the book.
+Book details allow adding, replacing or removing JPEG/PNG covers from a local file, an image on the system clipboard, or a public HTTP(S) image URL. Private, loopback and local-network URL targets are blocked. URL images are downloaded and validated by the Rust backend, then stored locally; remote URLs are never used as display sources. Limits: 10 MiB encoded, 8,000 pixels per side, 128 MiB decoded. Images load lazily. A missing cover shows a repair message; replace/remove it without deleting the book.
 
-New covers are staged before updating the book reference. Existing assets are retained until commit; an asset cleanup warning after commit does **not** mean the metadata transaction was rolled back. Errors show a localized summary and expandable technical details. Protect these details as local information when sharing screenshots.
+Managed cover filenames use the sanitized book title plus the book ID and validated image extension. Editing a title renames its cover without losing the previously committed asset on failure. New covers are staged before updating the book reference. Existing assets are retained until commit; an asset cleanup warning after commit does **not** mean the metadata transaction was rolled back. Errors show a localized summary and expandable technical details. Protect these details as local information when sharing screenshots. Downloading a URL cover sends a request to that server and may disclose the device's public IP address and request metadata.
 
 ## CSV book import
 

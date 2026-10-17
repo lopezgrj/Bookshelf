@@ -54,6 +54,13 @@ async function prepare(page, language = "en", libraryOpen = true) {
         }
         if (command === "save_book") { books.push({ ...args, id: args.id || "new-book", totalCopies: 0, availableCopies: 0 }); return; }
         if (command === "save_patron" || command === "add_copy" || command === "update_copy" || command === "checkout") return;
+        if (["set_cover", "set_cover_from_clipboard", "set_cover_from_url"].includes(command)) {
+          const book = books.find((item) => item.id === args.bookId);
+          book.coverImage = { path: `covers/${book.title}--${book.id}.png`, mediaType: "image/png" };
+          return book;
+        }
+        if (command === "cover_data") return "data:image/png;base64,AA==";
+        if (command === "remove_cover") return;
         if (command === "delete_book") { books.splice(books.findIndex((book) => book.id === args.id), 1); return; }
         if (command === "resolve_lost_loan") { loans[0].loan.closedAt = "2025-01-05"; loans[0].loan.closureReason = "lost_resolved"; return; }
         if (command === "return_loan") { loans[0].loan.closedAt = "2025-01-05"; loans[0].loan.closureReason = "returned"; return; }
@@ -311,6 +318,7 @@ test("invalid CSV preview errors are paginated instead of rendering the entire e
       record: index + 2, column: "title", code: "required_title",
     }));
   });
+
   await page.locator("#import-books").click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator(".csv-errors li")).toHaveCount(50);
@@ -319,4 +327,24 @@ test("invalid CSV preview errors are paginated instead of rendering the entire e
   await expect(dialog.locator(".csv-errors li")).toHaveCount(1);
   await expect(dialog.locator(".csv-errors li")).toContainText("102");
   await expect(dialog.getByRole("button", { name: "Import books", exact: true })).toBeDisabled();
+});
+
+test("cover source dialog supports file, clipboard image and HTTP URL", async ({ page }) => {
+  await prepare(page);
+  await page.locator(".book-card [data-book]").first().click();
+  await page.getByRole("button", { name: messages.en.changeCover, exact: true }).click();
+  await expect(page.getByRole("button", { name: messages.en.coverFromFile, exact: true })).toBeVisible();
+  await page.getByRole("button", { name: messages.en.coverFromClipboard, exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.testCalls.some(
+    (call) => call.command === "set_cover_from_clipboard",
+  ))).toBe(true);
+
+  await page.locator(".book-card [data-book]").first().click();
+  await page.getByRole("button", { name: messages.en.changeCover, exact: true }).click();
+  await page.getByLabel(messages.en.coverUrl, { exact: true }).fill("http://example.com/cover.png");
+  await page.getByRole("button", { name: messages.en.coverFromUrl, exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.testCalls.some(
+    (call) => call.command === "set_cover_from_url"
+      && call.args.url === "http://example.com/cover.png",
+  ))).toBe(true);
 });
