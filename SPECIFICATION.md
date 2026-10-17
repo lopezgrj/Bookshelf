@@ -42,6 +42,7 @@ Build a Rust desktop application for managing a small library's physical book co
 8. Provide separate optional DDC and LCC fields in the book creation/editing form and show them in book details. A book may have either, both, or neither classification. Localize their labels and help text in English, Spanish, and French without translating the stored classification values.
 9. Provide an optional free-text `location` on each physical copy (for example, `Room A / Shelf 3 / Bin B`). Allow it to be added, edited, cleared, displayed, and searched independently of DDC and LCC. Blank locations are absent; copies of the same book may have different locations.
 10. Provide optional book `tags` and `identifiers` as lists of strings, an optional `language` text value describing the book's content language, and an optional positive whole-number `pages` count. Allow these fields to be added, edited, displayed, searched where applicable, and cleared independently. Tags and identifiers are lists of nonblank values; identifiers are additional identifiers beyond the dedicated ISBN field and are stored as strings, preserving leading zeros and notation. Do not require identifiers to be unique or validate them against an external authority. Treat a blank language as absent; preserve a nonblank value as entered. Do not confuse a book's content language with the application's interface language.
+11. Provide **List** and **Grid** display modes for the Books catalog, with a visible control for switching between them. List is the default for a new application profile. Persist the selected mode in application-level settings and restore it after restart; the preference applies across libraries. Both modes must expose the same books, ordering, filters, pagination, availability information, cover state, and book actions. List mode must show a compact row for each book with its cover thumbnail or placeholder, title, first author when present, ISBN when present, total and available copy counts, and access to book details. Switching modes must preserve the current search, filters, sort direction, page, and page size.
 
 ### 4.2 Copy status
 
@@ -107,7 +108,7 @@ The Tauri desktop interface must provide screens or equivalent workflows for:
 - Adding and updating physical copies, viewing their status and shelf location, and recording loss, recovery, withdrawal, or loss resolution.
 - Registering, searching, editing, and deactivating patrons.
 - Checking out and returning copies, and viewing active and overdue loans.
-- Choosing the interface language and configuring the loan period and library location.
+- Choosing the interface language, selecting the Books list/grid display mode, and configuring the loan period and library location.
 - Creating, validating, and restoring library backups.
 
 Display clear validation and operational errors. Confirm destructive actions before they are performed. Data-changing operations must report success only after the database transaction commits.
@@ -164,7 +165,7 @@ Unknown columns must be explicitly acknowledged in the preview before import can
 **Requirement STORE-001:** Each library is a portable directory containing `library.sqlite3` and its own `covers/` directory. Cover paths are relative to that library, never another library or a machine-specific application data directory.
 
 - Provide separate **Create library** and **Open library** actions. Creation uses a new or empty directory and never replaces existing contents. Opening validates an existing library before switching; a failed open leaves the current library unchanged.
-- Persist the selected library directory in application-level settings and reopen it after restart. Store interface language at application level; store the default loan period with the library. Changing libraries invalidates pending edits and CSV previews, with confirmation before discarding unsaved work.
+- Persist the selected library directory in application-level settings and reopen it after restart. Store interface language and the Books list/grid display preference at application level; store the default loan period with the library. Default a missing display preference to List for new and older application settings. Changing libraries invalidates pending edits and CSV previews, with confirmation before discarding unsaved work.
 - A library lock represents exclusive write access. If another application instance holds the lock, do not open that library for writing. Detect and report a lock as stale only when the platform's lock mechanism can establish that its owning process is no longer running; otherwise require the user to close the other instance or choose another library. Do not automatically remove an ambiguous lock.
 - On first launch offer creation at a documented platform-default location or selection of an existing library. If the last library is missing or inaccessible, offer retry, locate, or create actions; do not silently create an empty replacement.
 - Moving the complete library directory must preserve books, loans, and cover references on all supported operating systems. Detect a library already open for writing by another app instance and report the lock rather than permitting conflicting asset changes.
@@ -239,7 +240,7 @@ Tests are part of the application deliverable, not an optional follow-up. Every 
 - **Rust unit tests:** Cover book and classification validation, copy status transitions, patron eligibility, checkout/return rules, overdue date boundaries, and CSV parsing and duplicate detection.
 - **SQLite integration tests:** Use real temporary SQLite databases to verify JSON document persistence after reopening, uniqueness and reference integrity, migrations and older-document compatibility, and full transaction rollback on failed operations.
 - **Cover image tests:** Cover valid JPEG/PNG files, clipboard image bytes, HTTP and HTTPS retrieval, redirects, blocked private/non-public addresses, DNS rebinding defenses, credentials and unsupported schemes, timeouts, streaming size limits, unsupported or corrupt images, dimension/allocation limits, path restrictions, title-based filenames and renames, replacement/removal, cancellation, and cleanup failures without loss of the current cover. Use controlled local HTTP fixtures and mocked DNS/network boundaries; tests must not contact external services.
-- **Frontend tests:** Verify forms, navigation, loading and error states, destructive-action confirmation, catalog and patron search, classification fields, and import preview/confirmation/cancellation. Cover all three interface languages, translation-key completeness, and localized dates and errors.
+- **Frontend tests:** Verify forms, navigation, loading and error states, destructive-action confirmation, catalog and patron search, classification fields, Books list/grid switching and application-level persistence, state preservation while switching modes, and import preview/confirmation/cancellation. Cover all three interface languages, translation-key completeness, and localized dates and errors.
 - **CSV workflow tests:** Exercise both comma and pipe delimiters, BOM and Unicode, quoting and multiline fields, headers, invalid values, unknown-column acknowledgement, duplicate confirmation, cancellation, and atomic import failures.
 - **End-to-end tests:** Exercise the desktop UI through the real Tauri command layer and Rust backend, using isolated test data: create/search/edit a book, manage classifications and a cover, add a copy and patron, check out and return a book, and preview/import CSV records. Mocked browser tests may supplement these tests but do not replace real desktop integration testing.
 - **Startup smoke test:** Launch the application and verify that its window and catalog load without a panic, plugin initialization failure, missing capability, or frontend startup error. Compilation alone is not sufficient.
@@ -326,6 +327,7 @@ The first release is acceptable when:
 18. A complete library can be moved, reopened after restart, backed up with live WAL data, and restored into a new directory without losing documents, library settings (including the loan period), or covers. Restore does not overwrite application-level language or machine-specific preferences. Failed opening, migration, backup, or restore leaves the original library usable.
 19. Shelf locations, Unicode/accent-insensitive search, sorting, filters, and pagination behave as specified. Comma/pipe selection, ambiguity handling, limits, progress, and cancellation are verified.
 20. Accessibility checks, the supported-platform test matrix, and the performance measurements in sections 6.2–6.4 meet their requirements, with recorded evidence rather than build-only or mocked-browser claims.
+21. A librarian can switch the Books catalog between List and Grid modes without changing the current query, filters, sort, page, or page size. List is the default for a new or older application profile, the selected mode persists across restarts and library changes, and both modes expose equivalent catalog records, availability, cover state, and book actions.
 
 ## 9. Requirement traceability and release evidence
 
@@ -335,15 +337,15 @@ This is a verification map, not an implementation-status report:
 
 | Requirement | Scope | Acceptance criteria | Required verification |
 | --- | --- | --- | --- |
-| CAT-001 | Books, classifications, copies, shelf locations, deletion | 1, 3, 4, 15, 19 | Domain, persistence, frontend, real desktop workflows |
+| CAT-001 | Books, classifications, copies, shelf locations, deletion, list/grid display | 1, 3, 4, 15, 19, 21 | Domain, persistence, frontend, real desktop workflows |
 | CIRC-001 | Checkout, return, active/completed/lost loans, withdrawal | 1, 4–7, 17 | State-transition, date-boundary, rollback, real desktop tests |
 | PAT-001 | Patron lifecycle and history | 1, 4, 7 | Domain, persistence, frontend, real desktop tests |
 | I18N-001 | English, Spanish, French | 9 | Translation completeness, localized dates/errors, UI tests |
-| UI-001 | Navigation, forms, confirmations, outcomes | 1, 4, 8, 9 | Frontend and real desktop workflows |
+| UI-001 | Navigation, forms, confirmations, outcomes, catalog display modes | 1, 4, 8, 9, 21 | Frontend and real desktop workflows |
 | COVER-001 | Cover selection, validation, storage, cleanup | 8, 18 | Image fixtures, failure injection, crash recovery |
 | CSV-001 | Both delimiters, preview, duplicate control, atomic writes | 12–15, 19 | Parser, UI, limits/cancel, rollback and real desktop tests |
 | SEARCH-001 | Unicode search, ordering, filters, pagination | 3, 15, 19 | Unicode fixtures, stable page-boundary tests, UI tests |
-| STORE-001 | Portable libraries and persisted selection | 2, 18 | Move/reopen, switch/cancel, missing/locked library tests |
+| STORE-001 | Portable libraries and persisted application preferences | 2, 18, 21 | Move/reopen, switch/cancel, preference persistence, missing/locked library tests |
 | BACKUP-001 | Consistent backup and validated restoration | 18 | Live-WAL snapshot, round trip, archive validation, failure tests |
 | DATA-001 | JSON integrity, references, versioning, transactions | 2, 4–6, 10, 11, 18 | Real SQLite, old fixtures, migration and rollback tests |
 | TEST-001 | Required test suites and regression coverage | 10, 14, 16 | Suite results, reproducible commands, platform evidence |
